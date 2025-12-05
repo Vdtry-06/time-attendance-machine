@@ -1,12 +1,17 @@
 import express from "express";
 import pool from "../db.js";
+import { authenticateToken } from "../middleware/auth.js";  
 
 const router = express.Router();
+router.use(authenticateToken);
 
-// GET all records with optional date filter
+// GET all records with optional date filter and pagination
 router.get("/", async (req, res) => {
     try {
         const { date, start_date, end_date, employee_id } = req.query;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const offset = (page - 1) * limit;
         
         let query = `
             SELECT 
@@ -26,34 +31,59 @@ router.get("/", async (req, res) => {
             WHERE 1=1
         `;
         
+        let countQuery = `
+            SELECT COUNT(*) as total
+            FROM Record r
+            LEFT JOIN Employee e ON r.Employeeid = e.id
+            LEFT JOIN User u ON r.Userid = u.id
+            WHERE 1=1
+        `;
+        
         const params = [];
         
         // Filter by specific date
         if (date) {
             query += " AND DATE(r.time) = ?";
+            countQuery += " AND DATE(r.time) = ?";
             params.push(date);
         }
         
         // Filter by date range
         if (start_date && end_date) {
             query += " AND DATE(r.time) BETWEEN ? AND ?";
+            countQuery += " AND DATE(r.time) BETWEEN ? AND ?";
             params.push(start_date, end_date);
         }
         
         // Filter by employee
         if (employee_id) {
             query += " AND r.Employeeid = ?";
+            countQuery += " AND r.Employeeid = ?";
             params.push(employee_id);
         }
         
-        query += " ORDER BY r.time DESC";
+        // Get total count
+        const [countResult] = await pool.query(countQuery, params);
+        const total = countResult[0].total;
         
-        const [rows] = await pool.query(query, params);
+        // Get paginated data
+        query += " ORDER BY r.time DESC LIMIT ? OFFSET ?";
+        const [rows] = await pool.query(query, [...params, limit, offset]);
+        
+        const totalPages = Math.ceil(total / limit);
         
         res.json({
             status: "success",
             count: rows.length,
-            data: rows
+            data: rows,
+            pagination: {
+                page: page,
+                limit: limit,
+                total: total,
+                totalPages: totalPages,
+                hasNext: page < totalPages,
+                hasPrev: page > 1
+            }
         });
         
     } catch (error) {
@@ -62,11 +92,22 @@ router.get("/", async (req, res) => {
     }
 });
 
-// GET today's records
+// GET today's records with pagination
 router.get("/today", async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const offset = (page - 1) * limit;
         
+        // Get total count
+        const [countResult] = await pool.query(
+            "SELECT COUNT(*) as total FROM Record r WHERE DATE(r.time) = ?",
+            [today]
+        );
+        const total = countResult[0].total;
+        
+        // Get paginated data
         const [rows] = await pool.query(`
             SELECT 
                 r.id,
@@ -82,13 +123,24 @@ router.get("/today", async (req, res) => {
             LEFT JOIN Employee e ON r.Employeeid = e.id
             WHERE DATE(r.time) = ?
             ORDER BY r.time DESC
-        `, [today]);
+            LIMIT ? OFFSET ?
+        `, [today, limit, offset]);
+        
+        const totalPages = Math.ceil(total / limit);
         
         res.json({
             status: "success",
             date: today,
             count: rows.length,
-            data: rows
+            data: rows,
+            pagination: {
+                page: page,
+                limit: limit,
+                total: total,
+                totalPages: totalPages,
+                hasNext: page < totalPages,
+                hasPrev: page > 1
+            }
         });
         
     } catch (error) {
@@ -124,6 +176,7 @@ router.get("/statistics", async (req, res) => {
         // Records by employee
         const [byEmployee] = await pool.query(`
             SELECT 
+                e.id,
                 e.name,
                 COUNT(*) as total_records,
                 SUM(CASE WHEN r.isCheckIn = 1 THEN 1 ELSE 0 END) as check_ins,
@@ -139,7 +192,9 @@ router.get("/statistics", async (req, res) => {
         const [byDay] = await pool.query(`
             SELECT 
                 DATE(r.time) as date,
-                COUNT(*) as total
+                COUNT(*) as total,
+                SUM(CASE WHEN r.isCheckIn = 1 THEN 1 ELSE 0 END) as check_ins,
+                SUM(CASE WHEN r.isCheckIn = 0 THEN 1 ELSE 0 END) as check_outs
             FROM Record r
             ${dateFilter}
             GROUP BY DATE(r.time)
@@ -165,7 +220,8 @@ router.get("/statistics", async (req, res) => {
 // POST - Manual check-in (Admin adds record manually)
 router.post("/manual", async (req, res) => {
     try {
-        const { employee_id, user_id, check_time, note, isCheckIn } = req.body;
+        const { employee_id, check_time, note, isCheckIn } = req.body;
+        const user_id = req.user.id; // Lấy từ JWT token
         
         // Validate required fields
         if (!employee_id || !check_time) {
@@ -191,7 +247,7 @@ router.post("/manual", async (req, res) => {
         // Insert manual record
         const [result] = await pool.query(
             "INSERT INTO Record (Employeeid, Userid, time, note, isCheckIn, device) VALUES (?, ?, ?, ?, ?, ?)",
-            [employee_id, user_id || null, check_time, note || 'Chấm công thủ công', isCheckIn !== undefined ? isCheckIn : 1, 'WEB_MANUAL']
+            [employee_id, user_id, check_time, note || 'Chấm công thủ công', isCheckIn !== undefined ? isCheckIn : 1, 'WEB_MANUAL']
         );
         
         res.status(201).json({
@@ -200,7 +256,8 @@ router.post("/manual", async (req, res) => {
             data: {
                 id: result.insertId,
                 employee_name: employee[0].name,
-                time: check_time
+                time: check_time,
+                created_by: req.user.username
             }
         });
         

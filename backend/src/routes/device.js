@@ -3,11 +3,13 @@ import multer from "multer";
 import path from "path";
 import pool from "../db.js";
 import { fileURLToPath } from "url";
+// import { authenticateToken } from "./../middleware/auth.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
+// router.use(authenticateToken);
 
 // Configure multer for image upload
 const storage = multer.diskStorage({

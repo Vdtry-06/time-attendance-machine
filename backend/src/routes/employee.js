@@ -1,15 +1,42 @@
 import express from "express";
 import pool from "../db.js";
+import { authenticateToken } from "../middleware/auth.js"; 
 
 const router = express.Router();
+router.use(authenticateToken);
 
-// GET all employees
+// GET all employees with pagination
 router.get("/", async (req, res) => {
     try {
-        const [rows] = await pool.query("SELECT * FROM Employee ORDER BY id DESC");
+        // Lấy parameters phân trang từ query string
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const offset = (page - 1) * limit;
+        
+        // Lấy tổng số records
+        const [countResult] = await pool.query("SELECT COUNT(*) as total FROM Employee");
+        const total = countResult[0].total;
+        
+        // Lấy dữ liệu với phân trang
+        const [rows] = await pool.query(
+            "SELECT * FROM Employee ORDER BY id DESC LIMIT ? OFFSET ?",
+            [limit, offset]
+        );
+        
+        // Tính toán thông tin phân trang
+        const totalPages = Math.ceil(total / limit);
+        
         res.json({
             status: "success",
-            data: rows
+            data: rows,
+            pagination: {
+                page: page,
+                limit: limit,
+                total: total,
+                totalPages: totalPages,
+                hasNext: page < totalPages,
+                hasPrev: page > 1
+            }
         });
     } catch (error) {
         console.error(error);
@@ -39,19 +66,41 @@ router.get("/:id", async (req, res) => {
     }
 });
 
-// SEARCH employees by name
+// SEARCH employees by name with pagination
 router.get("/search/:name", async (req, res) => {
     try {
         const searchTerm = `%${req.params.name}%`;
-        const [rows] = await pool.query(
-            "SELECT * FROM Employee WHERE name LIKE ? ORDER BY name",
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const offset = (page - 1) * limit;
+        
+        // Đếm tổng số kết quả tìm kiếm
+        const [countResult] = await pool.query(
+            "SELECT COUNT(*) as total FROM Employee WHERE name LIKE ?",
             [searchTerm]
         );
+        const total = countResult[0].total;
+        
+        // Lấy dữ liệu với phân trang
+        const [rows] = await pool.query(
+            "SELECT * FROM Employee WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?",
+            [searchTerm, limit, offset]
+        );
+        
+        const totalPages = Math.ceil(total / limit);
         
         res.json({
             status: "success",
-            count: rows.length,
-            data: rows
+            count: total,
+            data: rows,
+            pagination: {
+                page: page,
+                limit: limit,
+                total: total,
+                totalPages: totalPages,
+                hasNext: page < totalPages,
+                hasPrev: page > 1
+            }
         });
     } catch (error) {
         console.error(error);
@@ -129,8 +178,6 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
     try {
         const employeeId = req.params.id;
-
-        // Lấy field gửi từ client
         const { name, position, identificationNum, email, phoneNum, fingerPrint } = req.body;
 
         // Lấy dữ liệu cũ
@@ -148,7 +195,7 @@ router.put("/:id", async (req, res) => {
 
         const old = existing[0];
 
-        // Merge dữ liệu (ưu tiên cái được gửi)
+        // Merge dữ liệu
         const updatedData = {
             name: name ?? old.name,
             position: position ?? old.position,
@@ -207,7 +254,7 @@ router.put("/:id", async (req, res) => {
         res.json({
             status: "success",
             message: "Employee updated successfully",
-            updated: updatedData
+            data: updatedData
         });
 
     } catch (error) {
