@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: attendance-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT}:80"
+    environment:
+      - BACKEND_URL=${BACKEND_URL}
+    networks:
+      - attendance-network
+
+networks:
+  attendance-network:
+    driver: bridge
