@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Edit, Trash2, Search, Fingerprint, Mail, Phone } from 'lucide-react';
+import { Plus, Edit, Trash2, Search, Fingerprint, Mail, Phone, Loader } from 'lucide-react';
 import { Button, Card, Modal, Input, Badge, Table, LoadingSpinner } from '../components/ui';
-import { employeeService } from '../services';
+import { employeeService, deviceService } from '../services';
 import toast from 'react-hot-toast';
 import { formatDate } from '../utils/dateUtils';
 import { getStatusColor, getStatusText } from '../utils/helpers';
@@ -17,6 +17,8 @@ const EmployeeModal = ({ isOpen, onClose, employee }) => {
     phoneNum: '',
     fingerPrint: '',
   });
+  const [isEnrolling, setIsEnrolling] = useState(false);
+  const [enrollStatus, setEnrollStatus] = useState('');
 
   const mutation = useMutation({
     mutationFn: (data) => employee
@@ -32,8 +34,69 @@ const EmployeeModal = ({ isOpen, onClose, employee }) => {
     },
   });
 
+  // Polling để lấy fingerprint ID sau khi quét
+  useEffect(() => {
+    let interval;
+    if (isEnrolling) {
+      interval = setInterval(async () => {
+        try {
+          // Gọi API để kiểm tra xem đã có fingerprint ID chưa
+          const response = await deviceService.getStatus();
+          if (response?.data?.lastEnrolledId) {
+            setFormData({ ...formData, fingerPrint: response.data.lastEnrolledId });
+            setIsEnrolling(false);
+            setEnrollStatus('');
+            toast.success(`Đã lấy vân tay thành công! ID: ${response.data.lastEnrolledId}`);
+          }
+        } catch (error) {
+          console.error('Error checking enrollment status:', error);
+        }
+      }, 2000); // Check mỗi 2 giây
+    }
+    return () => clearInterval(interval);
+  }, [isEnrolling, formData]);
+
+  const handleEnrollFingerprint = async () => {
+    try {
+      setIsEnrolling(true);
+      setEnrollStatus('Đang gửi yêu cầu đến thiết bị...');
+      
+      // Gọi API để bắt đầu quá trình đăng ký vân tay
+      await deviceService.enrollFingerprint();
+      
+      setEnrollStatus('Vui lòng đặt ngón tay lên cảm biến vân tay...');
+      toast.info('Vui lòng đặt ngón tay lên cảm biến vân tay', { duration: 5000 });
+      
+      // Sau 30 giây tự động dừng nếu không có kết quả
+      setTimeout(() => {
+        if (isEnrolling) {
+          setIsEnrolling(false);
+          setEnrollStatus('');
+          toast.error('Hết thời gian chờ. Vui lòng thử lại.');
+        }
+      }, 30000);
+      
+    } catch (error) {
+      setIsEnrolling(false);
+      setEnrollStatus('');
+      toast.error('Không thể kết nối với thiết bị. Vui lòng kiểm tra lại.');
+    }
+  };
+
+  const handleCancelEnroll = () => {
+    setIsEnrolling(false);
+    setEnrollStatus('');
+    toast.info('Đã hủy quá trình lấy vân tay');
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
+    
+    if (!employee && !formData.fingerPrint) {
+      toast.error('Vui lòng lấy vân tay trước khi thêm nhân viên');
+      return;
+    }
+    
     mutation.mutate(formData);
   };
 
@@ -91,13 +154,63 @@ const EmployeeModal = ({ isOpen, onClose, employee }) => {
           onChange={(e) => setFormData({ ...formData, position: e.target.value })}
         />
 
-        <Input
-          label="Fingerprint ID (tùy chọn)"
-          type="number"
-          value={formData.fingerPrint}
-          onChange={(e) => setFormData({ ...formData, fingerPrint: e.target.value })}
-          placeholder="ID vân tay từ thiết bị"
-        />
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-gray-700">
+            Vân tay {!employee && <span className="text-red-500">*</span>}
+          </label>
+          
+          {!formData.fingerPrint ? (
+            <div className="space-y-3">
+              {!isEnrolling ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={handleEnrollFingerprint}
+                  icon={<Fingerprint className="w-5 h-5" />}
+                  className="w-full"
+                >
+                  Lấy vân tay từ thiết bị
+                </Button>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-center p-4 bg-blue-50 rounded-lg border-2 border-blue-200 border-dashed">
+                    <div className="text-center">
+                      <Loader className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-2" />
+                      <p className="text-sm font-medium text-blue-900">{enrollStatus}</p>
+                      <p className="text-xs text-blue-600 mt-1">Đang chờ quét vân tay...</p>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={handleCancelEnroll}
+                    className="w-full"
+                  >
+                    Hủy
+                  </Button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center gap-3 p-3 bg-green-50 rounded-lg border border-green-200">
+              <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                <Fingerprint className="w-6 h-6 text-green-600" />
+              </div>
+              <div className="flex-1">
+                <p className="text-sm font-medium text-green-900">Đã có dữ liệu vân tay</p>
+                <p className="text-xs text-green-600">Fingerprint ID: {formData.fingerPrint}</p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => setFormData({ ...formData, fingerPrint: '' })}
+              >
+                Đổi
+              </Button>
+            </div>
+          )}
+        </div>
       </form>
     </Modal>
   );

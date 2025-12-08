@@ -8,8 +8,68 @@ export const authService = {
   refreshToken: () => apiClient.post('/auth/refresh'),
 };
 
-// Employees
-export const employeeService = {
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Service = {
   getAll: (params) => apiClient.get('/employees', { params }),
   getById: (id) => apiClient.get(`/employees/${id}`),
   search: (name, params) => apiClient.get(`/employees/search/${name}`, { params }),
@@ -30,4 +90,5 @@ export const recordService = {
 // Devices (ESP32)
 export const deviceService = {
   getStatus: () => apiClient.get('/device/status'),
+  enrollFingerprint: () => apiClient.post('/device/enroll-notify'),
 };
