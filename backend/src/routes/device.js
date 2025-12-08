@@ -30,6 +30,13 @@ router.post('/enroll-notify', deviceController.enrollNotify);
 router.post('/status', deviceController.deviceStatus);
 router.get('/status', deviceController.deviceStatus);
 
+/**
+ * POST /api/device/power-status-report
+ * ESP32 báo cáo trạng thái nguồn lên server
+ * Body: { device_name: "ESP32-AS608-01", power_status: true/false }
+ */
+router.post('/power-status-report', deviceController.powerStatusReport);
+
 // ========== ADMIN API ROUTES (CẦN JWT TOKEN) ==========
 
 /**
@@ -45,6 +52,27 @@ router.post('/request-enroll', authenticateToken, deviceController.requestEnroll
  * Body: { device_name: "ESP32-AS608-01", fingerprint_id: 5 }
  */
 router.post('/delete-fingerprint', authenticateToken, deviceController.deleteFingerprint);
+
+/**
+ * POST /api/device/power-on
+ * Admin bật nguồn AS608 + LCD qua relay
+ * Body: { device_name: "ESP32-AS608-01" }
+ */
+router.post('/power-on', authenticateToken, deviceController.powerOn);
+
+/**
+ * POST /api/device/power-off
+ * Admin tắt nguồn AS608 + LCD qua relay
+ * Body: { device_name: "ESP32-AS608-01" }
+ */
+router.post('/power-off', authenticateToken, deviceController.powerOff);
+
+/**
+ * GET /api/device/power-status
+ * Admin lấy trạng thái nguồn hiện tại
+ * Query: ?device_name=ESP32-AS608-01
+ */
+router.get('/power-status', authenticateToken, deviceController.getPowerStatus);
 
 /**
  * GET /api/device/employees/fingerprints

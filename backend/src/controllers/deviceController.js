@@ -96,7 +96,6 @@ export const requestEnroll = async (req, res) => {
             });
         }
         
-        // Lấy thông tin nhân viên
         const [employees] = await pool.query(
             "SELECT * FROM Employee WHERE id = ?",
             [employee_id]
@@ -118,7 +117,6 @@ export const requestEnroll = async (req, res) => {
             });
         }
         
-        // Gửi lệnh qua MQTT
         const success = mqttService.sendEnrollRequest(device_name, {
             employee_id: employee.id,
             employee_name: employee.name,
@@ -189,6 +187,174 @@ export const deleteFingerprint = async (req, res) => {
         
     } catch (error) {
         console.error('[DELETE-FINGERPRINT ERROR]:', error);
+        res.status(500).json({
+            status: "error",
+            message: error.message
+        });
+    }
+};
+
+/**
+ * ADMIN API: Bật nguồn AS608 + LCD (relay ON)
+ * POST /api/device/power-on
+ * Body: { device_name }
+ */
+export const powerOn = async (req, res) => {
+    try {
+        const { device_name } = req.body;
+        
+        if (!device_name) {
+            return res.status(400).json({
+                status: "error",
+                message: "device_name is required"
+            });
+        }
+        
+        const success = mqttService.sendCommand(device_name, {
+            action: 'power_on'
+        });
+        
+        if (!success) {
+            return res.status(503).json({
+                status: "error",
+                message: "MQTT service unavailable"
+            });
+        }
+        
+        res.json({
+            status: "success",
+            message: "Power ON command sent",
+            device: device_name
+        });
+        
+        console.log(`[POWER-ON] Command sent to ${device_name}`);
+        
+    } catch (error) {
+        console.error('[POWER-ON ERROR]:', error);
+        res.status(500).json({
+            status: "error",
+            message: error.message
+        });
+    }
+};
+
+/**
+ * ADMIN API: Tắt nguồn AS608 + LCD (relay OFF)
+ * POST /api/device/power-off
+ * Body: { device_name }
+ */
+export const powerOff = async (req, res) => {
+    try {
+        const { device_name } = req.body;
+        
+        if (!device_name) {
+            return res.status(400).json({
+                status: "error",
+                message: "device_name is required"
+            });
+        }
+        
+        const success = mqttService.sendCommand(device_name, {
+            action: 'power_off'
+        });
+        
+        if (!success) {
+            return res.status(503).json({
+                status: "error",
+                message: "MQTT service unavailable"
+            });
+        }
+        
+        res.json({
+            status: "success",
+            message: "Power OFF command sent",
+            device: device_name
+        });
+        
+        console.log(`[POWER-OFF] Command sent to ${device_name}`);
+        
+    } catch (error) {
+        console.error('[POWER-OFF ERROR]:', error);
+        res.status(500).json({
+            status: "error",
+            message: error.message
+        });
+    }
+};
+
+/**
+ * ADMIN API: Lấy trạng thái nguồn từ ESP32
+ * GET /api/device/power-status
+ * Query: ?device_name=ESP32-AS608-01
+ */
+export const getPowerStatus = async (req, res) => {
+    try {
+        const { device_name } = req.query;
+        
+        if (!device_name) {
+            return res.status(400).json({
+                status: "error",
+                message: "device_name is required"
+            });
+        }
+        
+        // Request status update via MQTT
+        const success = mqttService.sendCommand(device_name, {
+            action: 'get_power_status'
+        });
+        
+        if (!success) {
+            return res.status(503).json({
+                status: "error",
+                message: "MQTT service unavailable"
+            });
+        }
+        
+        res.json({
+            status: "success",
+            message: "Power status request sent. Check MQTT response.",
+            device: device_name
+        });
+        
+    } catch (error) {
+        console.error('[GET-POWER-STATUS ERROR]:', error);
+        res.status(500).json({
+            status: "error",
+            message: error.message
+        });
+    }
+};
+
+/**
+ * ESP32 gửi trạng thái nguồn lên server
+ * POST /api/device/power-status-report
+ * Body: { device_name, power_status: true/false }
+ */
+export const powerStatusReport = async (req, res) => {
+    try {
+        const { device_name, power_status } = req.body;
+        
+        if (!device_name || power_status === undefined) {
+            return res.status(400).json({
+                status: "error",
+                message: "device_name and power_status are required"
+            });
+        }
+        
+        console.log(`[POWER-STATUS] ${device_name}: ${power_status ? 'ON' : 'OFF'}`);
+        
+        // Có thể lưu vào database nếu cần
+        // await pool.query("INSERT INTO device_status ...", [device_name, power_status]);
+        
+        res.json({
+            status: "success",
+            message: "Power status received",
+            device: device_name,
+            power_status: power_status
+        });
+        
+    } catch (error) {
+        console.error('[POWER-STATUS-REPORT ERROR]:', error);
         res.status(500).json({
             status: "error",
             message: error.message
