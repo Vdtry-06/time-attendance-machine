@@ -8,68 +8,8 @@ export const authService = {
   refreshToken: () => apiClient.post('/auth/refresh'),
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Service = {
+// Employees
+export const employeeService = {
   getAll: (params) => apiClient.get('/employees', { params }),
   getById: (id) => apiClient.get(`/employees/${id}`),
   search: (name, params) => apiClient.get(`/employees/search/${name}`, { params }),
@@ -84,11 +24,17 @@ export const recordService = {
   getTodayRecords: (params) => apiClient.get('/records/today', { params }),
   getStatistics: (params) => apiClient.get('/records/statistics', { params }),
   createManual: (data) => apiClient.post('/records/manual', data),
+  checkin: (data) => apiClient.post('/device/checkin', data),
   delete: (id) => apiClient.delete(`/records/${id}`),
 };
 
 // Devices (ESP32)
 export const deviceService = {
   getStatus: () => apiClient.get('/device/status'),
-  enrollFingerprint: () => apiClient.post('/device/enroll-notify'),
+  enrollFingerprint: (employeeId, deviceName = 'ESP32-AS608-01') => 
+    apiClient.post(`/employees/${employeeId}/enroll-fingerprint`, { device_name: deviceName }),
+  getEnrollmentStatus: (employeeId) => 
+    apiClient.get(`/employees/${employeeId}/enrollment-status`),
+  deleteFingerprint: (employeeId) => 
+    apiClient.delete(`/employees/${employeeId}/fingerprint`),
 };
