@@ -35,7 +35,7 @@ export const Table = ({ columns, data, loading, emptyMessage = 'Không có dữ 
             <tr key={rowIndex} className="hover:bg-gray-50 transition-colors">
               {columns.map((column, colIndex) => (
                 <td key={colIndex} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {column.cell ? column.cell(row) : row[column.accessor]}
+                  {column.cell ? column.cell(row, rowIndex) : row[column.accessor]}
                 </td>
               ))}
             </tr>

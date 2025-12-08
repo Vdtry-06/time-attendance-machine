@@ -9,7 +9,7 @@ import { getStatusColor, getStatusText } from '../utils/helpers';
 
 const EmployeeModal = ({ isOpen, onClose, employee, isEnrollMode = false }) => {
   const queryClient = useQueryClient();
-  const [formData, setFormData] = useState(employee || {
+  const [formData, setFormData] = useState({
     name: '',
     position: '',
     identificationNum: '',
@@ -20,6 +20,29 @@ const EmployeeModal = ({ isOpen, onClose, employee, isEnrollMode = false }) => {
   const [isEnrolling, setIsEnrolling] = useState(false);
   const [enrollStatus, setEnrollStatus] = useState('');
   const [showEnrollOnly, setShowEnrollOnly] = useState(isEnrollMode);
+
+  // Load dữ liệu employee vào form khi mở modal
+  useEffect(() => {
+    if (employee) {
+      setFormData({
+        name: employee.name || '',
+        position: employee.position || '',
+        identificationNum: employee.identificationNum || '',
+        email: employee.email || '',
+        phoneNum: employee.phoneNum || '',
+        fingerPrint: employee.fingerPrint || '',
+      });
+    } else {
+      setFormData({
+        name: '',
+        position: '',
+        identificationNum: '',
+        email: '',
+        phoneNum: '',
+        fingerPrint: '',
+      });
+    }
+  }, [employee, isOpen]);
 
   const mutation = useMutation({
     mutationFn: (data) => employee
@@ -244,63 +267,78 @@ const EmployeeModal = ({ isOpen, onClose, employee, isEnrollMode = false }) => {
           </>
         )}
 
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-gray-700">
-            Vân tay
-          </label>
-          
-          {!formData.fingerPrint ? (
-            <div className="space-y-3">
-              {!isEnrolling ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={handleEnrollFingerprint}
-                  icon={<Fingerprint className="w-5 h-5" />}
-                  className="w-full"
-                >
-                  Lấy vân tay từ thiết bị
-                </Button>
-              ) : (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-center p-4 bg-blue-50 rounded-lg border-2 border-blue-200 border-dashed">
-                    <div className="text-center">
-                      <Loader className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-2" />
-                      <p className="text-sm font-medium text-blue-900">{enrollStatus}</p>
-                      <p className="text-xs text-blue-600 mt-1">Đang chờ quét vân tay...</p>
-                    </div>
-                  </div>
+        {/* Chỉ hiển thị phần vân tay khi thêm mới hoặc ở chế độ enroll */}
+        {(showEnrollOnly || !employee) && (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-700">
+              Vân tay
+            </label>
+            
+            {!formData.fingerPrint ? (
+              <div className="space-y-3">
+                {!isEnrolling ? (
                   <Button
                     type="button"
                     variant="secondary"
-                    onClick={handleCancelEnroll}
+                    onClick={handleEnrollFingerprint}
+                    icon={<Fingerprint className="w-5 h-5" />}
                     className="w-full"
                   >
-                    Hủy
+                    Lấy vân tay từ thiết bị
                   </Button>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-center p-4 bg-blue-50 rounded-lg border-2 border-blue-200 border-dashed">
+                      <div className="text-center">
+                        <Loader className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-2" />
+                        <p className="text-sm font-medium text-blue-900">{enrollStatus}</p>
+                        <p className="text-xs text-blue-600 mt-1">Đang chờ quét vân tay...</p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={handleCancelEnroll}
+                      className="w-full"
+                    >
+                      Hủy
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center gap-3 p-3 bg-green-50 rounded-lg border border-green-200">
+                <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                  <Fingerprint className="w-6 h-6 text-green-600" />
                 </div>
-              )}
-            </div>
-          ) : (
-            <div className="flex items-center gap-3 p-3 bg-green-50 rounded-lg border border-green-200">
-              <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                <Fingerprint className="w-6 h-6 text-green-600" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-green-900">Đã có dữ liệu vân tay</p>
+                  <p className="text-xs text-green-600">Fingerprint ID: {formData.fingerPrint}</p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        
+        {/* Hiển thị thông tin vân tay khi edit (chỉ đọc) */}
+        {employee && !showEnrollOnly && employee.fingerPrint && (
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-700">
+              Vân tay
+            </label>
+            <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+              <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center">
+                <Fingerprint className="w-6 h-6 text-gray-600" />
               </div>
               <div className="flex-1">
-                <p className="text-sm font-medium text-green-900">Đã có dữ liệu vân tay</p>
-                <p className="text-xs text-green-600">Fingerprint ID: {formData.fingerPrint}</p>
+                <p className="text-sm font-medium text-gray-900">Đã đăng ký vân tay</p>
+                <p className="text-xs text-gray-600">Fingerprint ID: {employee.fingerPrint}</p>
               </div>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => setFormData({ ...formData, fingerPrint: '' })}
-              >
-                Đổi
-              </Button>
+              <Badge variant="success">Đã có</Badge>
             </div>
-          )}
-        </div>
+            <p className="text-xs text-gray-500 italic">* Không thể thay đổi vân tay khi cập nhật thông tin</p>
+          </div>
+        )}
       </form>
     </Modal>
   );
