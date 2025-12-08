@@ -267,8 +267,8 @@ const EmployeeModal = ({ isOpen, onClose, employee, isEnrollMode = false }) => {
           </>
         )}
 
-        {/* Chỉ hiển thị phần vân tay khi thêm mới hoặc ở chế độ enroll */}
-        {(showEnrollOnly || !employee) && (
+        {/* Hiển thị nút lấy vân tay khi: 1) Thêm mới, 2) Chế độ enroll, 3) Edit nhưng chưa có vân tay */}
+        {(showEnrollOnly || !employee || (employee && !employee.fingerPrint)) && (
           <div className="space-y-2">
             <label className="block text-sm font-medium text-gray-700">
               Vân tay
@@ -320,7 +320,7 @@ const EmployeeModal = ({ isOpen, onClose, employee, isEnrollMode = false }) => {
           </div>
         )}
         
-        {/* Hiển thị thông tin vân tay khi edit (chỉ đọc) */}
+        {/* Hiển thị thông tin vân tay khi edit VÀ đã có vân tay (chỉ đọc) */}
         {employee && !showEnrollOnly && employee.fingerPrint && (
           <div className="space-y-2">
             <label className="block text-sm font-medium text-gray-700">
