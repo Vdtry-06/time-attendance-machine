@@ -383,15 +383,6 @@ export const deleteEmployee = async (req, res) => {
             });
         }
         
-        const [records] = await pool.query("SELECT COUNT(*) as count FROM Record WHERE Employeeid = ?", [req.params.id]);
-        
-        if (records[0].count > 0) {
-            return res.status(409).json({
-                status: "error",
-                message: "Không thể xóa nhân viên đã có lịch sử chấm công"
-            });
-        }
-        
         await pool.query("DELETE FROM Employee WHERE id = ?", [req.params.id]);
         
         res.json({
