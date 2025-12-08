@@ -37,4 +37,11 @@ export const deviceService = {
     apiClient.get(`/employees/${employeeId}/enrollment-status`),
   deleteFingerprint: (employeeId) => 
     apiClient.delete(`/employees/${employeeId}/fingerprint`),
+  // Power management
+  powerOn: (deviceName = 'ESP32-AS608-01') => 
+    apiClient.post('/device/power-on', { device_name: deviceName }),
+  powerOff: (deviceName = 'ESP32-AS608-01') => 
+    apiClient.post('/device/power-off', { device_name: deviceName }),
+  getPowerStatus: (deviceName = 'ESP32-AS608-01') => 
+    apiClient.get('/device/power-status', { params: { device_name: deviceName } }),
 };
