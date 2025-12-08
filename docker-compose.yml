@@ -1,6 +1,21 @@
 version: "3.8"
 
 services:
+
+  # ========== MQTT BROKER ==========
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto_iot
+    restart: always
+    ports:
+      - "1883:1883"      # MQTT port
+      - "9001:9001"      # WebSocket port (optional)
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    command: mosquitto -c /mosquitto/config/mosquitto.conf
+
   mysql:
     image: mysql:8.0
     container_name: mysql_iot
@@ -33,6 +48,9 @@ services:
       DB_USER: user
       DB_PASSWORD: password
       DB_NAME: iotfinger
+      MQTT_BROKER: mqtt://broker.hivemq.com:1883
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
       PORT: 8080
     ports:
       - "8080:8080"
