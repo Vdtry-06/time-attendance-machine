@@ -1,977 +1,943 @@
-/*
- * ESP32-S3 Fingerprint + Camera device firmware (with automatic health-check)
- * Flow:
- * - Temp-enroll on device -> POST /devices/enroll-temp (send finger_id/slot)
- * - You fill employee info on website -> server builds mapping slot->employee_code
- * - Device quickly polls mappings for 60s after temp-enroll to catch the new mapping
- * - Later scans will punch IN when mapping exists
- *
- * NOTE: Fill WIFI_SSID, WIFI_PASS, API_BASE, DEVICE_TOKEN, DEVICE_KEY before flashing
- */
-
-#include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <PubSubClient.h>
 #include <Adafruit_Fingerprint.h>
-#include <LiquidCrystal.h>
-#include <Preferences.h>
-#include "esp_camera.h"
-#include "esp_err.h"
-#include "mbedtls/md.h"
-#ifdef USE_ARDUINOJSON
 #include <ArduinoJson.h>
-#endif
-
-#define JSON_DOC_SIZE (16 * 1024)
-
-// =========================
-// CONFIG — FILL THESE
-// =========================
-const char* WIFI_SSID = "WI - FI";
-const char* WIFI_PASS = "18102004";
-String API_BASE = "http://192.168.1.5:8000/api";
-String DEVICE_TOKEN = "d2f4e1a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3"; // example
-String DEVICE_KEY = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8"; // hex or raw
-const char* FIRMWARE_VER = "2025-10-05-2";
-
-// Behavior flags (persisted to Preferences "device_cfg")
-bool autoReportTempEnroll = true;
-bool autoOverwriteUnmappedSlots = false;
-
-// Preferences (global, single definition)
-Preferences prefs;
-
-// =========================
-// PINOUT (adjust if needed)
-// =========================
-#define LCD_RS 4
-#define LCD_E 5
-#define LCD_D4 6
-#define LCD_D5 7
-#define LCD_D6 8
-#define LCD_D7 9
-#define BUZZER_PIN 14
-#define AS608_RX 16
-#define AS608_TX 17
-#define STATUS_LED_PIN 2
-#define ENROLL_BUTTON_PIN 0
-#ifndef LED_BUILTIN
-#define LED_BUILTIN 2
-#endif
-#undef STATUS_LED_PIN
-#define STATUS_LED_PIN LED_BUILTIN
-
-LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
-HardwareSerial SerialAS608(2);
-Adafruit_Fingerprint finger = Adafruit_Fingerprint(&SerialAS608);
-
-// Camera pins (example mapping; keep consistent with your hardware)
-#define CAM_PWDN  -1
-#define CAM_RESET -1
-#define CAM_XCLK  15
-#define CAM_SIOD  1
-#define CAM_SIOC  3
-#define CAM_Y9    40
-#define CAM_Y8    39
-#define CAM_Y7    38
-#define CAM_Y6    37
-#define CAM_Y5    36
-#define CAM_Y4    35
-#define CAM_Y3    34
-#define CAM_Y2    33
-#define CAM_VSYNC 12
-#define CAM_HREF  11
-#define CAM_PCLK  13
-
-// =========================
-// Constants & Buffers
-// =========================
-#define MAX_FINGER_SLOTS 200           // adjust to your sensor capacity
-uint8_t DEVICE_KEY_BYTES[64];
-size_t  DEVICE_KEY_BYTES_LEN = 0;
-bool stickyFailure = false;
-
-// Setup state / debounce / quick-sync vars
-int lastPunchedSlot = -1;
-unsigned long lastPunchedAt = 0;
-const unsigned long PUNCH_DEBOUNCE_MS = 5000;
-bool verboseGetImage = false;
-
-// Quick mapping sync after temp-enroll
-int lastEnrolledSlotPending = -1;
-unsigned long lastEnrollSyncUntil = 0;
-unsigned long lastMapShortPoll = 0;
-
-// =========================
-// Prototypes
-// =========================
-void loadDeviceSettings();
-void saveDeviceSettings();
-void setupCamera();
-void show(const String& l1, const String& l2 = "");
-void beepOK(); void beepErr(); void blinkLED(int times, int msDelay);
-bool hexToBytes(const String &hex, uint8_t *out, size_t &outLen);
-String hmacSha256Hex(const uint8_t* data, size_t len);
-String buildSignatureForJson(const String& json);
-
-bool sendPunch(const String& emp, const String& type, const String& method);
-bool healthCheck();
-
-void fetchMappingsAndSave();
-int  requestNextFreeSlotFromServer();
-int  freeOneUnmappedSlot();
-int  findLocalFreeSlot();
-int  getSlotOrFree();
-
-int  identifyFingerprint();
-void performTempEnroll();
-void performTempEnroll2();
-bool reportEnrollToServer(const String &employeeCode, int slot);
-String getMappingForSlot(int slot);
-void listMappings();
-void sendPunchForSlot(int slot);
-bool enrollFingerprintForEmployee(const String &employeeCode);
-void addPendingEnrollSlot(int slot);
-void resendPendingEnrolls();
-void printDiagnostics();
-
-// =========================
-// Settings helpers
-// =========================
-void loadDeviceSettings() {
-  prefs.begin("device_cfg", true);
-  autoReportTempEnroll = prefs.getBool("auto_report", true);
-  autoOverwriteUnmappedSlots = prefs.getBool("auto_overwrite", false);
-  prefs.end();
-}
-void saveDeviceSettings() {
-  prefs.begin("device_cfg", false);
-  prefs.putBool("auto_report", autoReportTempEnroll);
-  prefs.putBool("auto_overwrite", autoOverwriteUnmappedSlots);
-  prefs.end();
-}
-
-// =========================
-// UI helpers
-// =========================
-void show(const String& l1, const String& l2) {
-  lcd.clear();
-  lcd.setCursor(0, 0); lcd.print(l1);
-  lcd.setCursor(0, 1); lcd.print(l2);
-}
-void beepOK()  { tone(BUZZER_PIN, 2000, 120); }
-void beepErr() { tone(BUZZER_PIN,  400, 200); }
-void blinkLED(int times, int msDelay) {
-  for (int i = 0; i < times; ++i) {
-    digitalWrite(STATUS_LED_PIN, HIGH); delay(msDelay);
-    digitalWrite(STATUS_LED_PIN, LOW ); delay(msDelay);
-  }
-}
-
-// =========================
-// Crypto helpers
-// =========================
-bool hexToBytes(const String &hex, uint8_t *out, size_t &outLen) {
-  size_t len = hex.length(); if (len % 2 != 0) return false;
-  outLen = len / 2;
-  auto hv = [](char c)->int {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-  };
-  for (size_t i = 0; i < outLen; ++i) {
-    int vh = hv(hex.charAt(i*2)); int vl = hv(hex.charAt(i*2+1));
-    if (vh < 0 || vl < 0) return false;
-    out[i] = (uint8_t)((vh<<4) | vl);
-  }
-  return true;
-}
-String hmacSha256Hex(const uint8_t* data, size_t len) {
-  uint8_t hash[32];
-  mbedtls_md_context_t ctx; mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
-  mbedtls_md_hmac_starts(&ctx, DEVICE_KEY_BYTES, DEVICE_KEY_BYTES_LEN);
-  mbedtls_md_hmac_update(&ctx, data, len);
-  mbedtls_md_hmac_finish(&ctx, hash);
-  mbedtls_md_free(&ctx);
-  char hex[65]; for (int i=0;i<32;++i) sprintf(hex + i*2, "%02x", hash[i]); hex[64]=0;
-  return String(hex);
-}
-String buildSignatureForJson(const String& json) {
-  return "sha256=" + hmacSha256Hex((const uint8_t*)json.c_str(), json.length());
-}
-
-// =========================
-// Net calls
-// =========================
-bool sendPunch(const String& emp, const String& type, const String& method) {
-  if (WiFi.status() != WL_CONNECTED) { show("Mat mang"," "); beepErr(); return false; }
-  String body = "{\"employee_code\":\"" + emp + "\",\"type\":\"" + type + "\",\"method\":\"" + method + "\"}";
-  String sig = buildSignatureForJson(body);
-  Serial.print("sendPunch body: "); Serial.println(body);
-  Serial.print("sendPunch signature: "); Serial.println(sig);
-
-  HTTPClient http;
-  http.begin(API_BASE + "/devices/punch");
-  http.addHeader("Content-Type","application/json");
-  http.addHeader("Accept","application/json");
-  http.addHeader("X-Device-Token", DEVICE_TOKEN);
-  http.addHeader("X-Device-Signature", sig);
-  http.setTimeout(5000);
-
-  show("Gui du lieu..."," ");
-  int code = http.POST((uint8_t*)body.c_str(), body.length());
-  String resp = http.getString();
-  Serial.printf("Punch HTTP code: %d\n", code);
-  Serial.println(resp);
-  http.end();
-  if (code == 200) { show("Cham cong OK", emp); beepOK(); return true; }
-  show("Cham cong FAIL"," "); beepErr(); return false;
-}
-
-bool healthCheck() {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  unsigned long ts = millis();
-  String body = "{\"ts\":" + String(ts) + "}";
-  HTTPClient http;
-  http.begin(API_BASE + "/devices/heartbeat");
-  http.addHeader("Content-Type","application/json");
-  http.addHeader("Accept","application/json");
-  http.addHeader("X-DEVICE-KEY", DEVICE_KEY);
-  http.setTimeout(5000);
-
-  Serial.println("Health-check: sending...");
-  Serial.print("URL: "); Serial.println(API_BASE + "/devices/heartbeat");
-  Serial.print("Body: "); Serial.println(body);
-  Serial.print("Key : "); Serial.println(DEVICE_KEY);
-
-  show("Health-check..."," ");
-  int code = http.POST((uint8_t*)body.c_str(), body.length());
-  String resp = http.getString();
-  Serial.printf("Ping HTTP code: %d\n", code);
-  Serial.println(resp);
-  http.end();
-
-  if (code == 200) {
-    show("Ping OK", String(ts)); beepOK();
-    stickyFailure = false;
-    digitalWrite(STATUS_LED_PIN, LOW);
-    blinkLED(5, 100);
-    digitalWrite(STATUS_LED_PIN, LOW);
-    return true;
-  } else {
-    show("Ping FAIL"," "); beepErr();
-    stickyFailure = true;
-    digitalWrite(STATUS_LED_PIN, HIGH);
-    return false;
-  }
-}
-
-void fetchMappingsAndSave() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  HTTPClient http;
-  String url = API_BASE + "/devices/mappings";
-  Serial.print("Fetching mappings from "); Serial.println(url);
-  String sig = buildSignatureForJson("");
-  http.begin(url);
-  http.addHeader("Accept", "application/json");
-  http.addHeader("X-Device-Token", DEVICE_TOKEN);
-  http.addHeader("X-Device-Signature", sig);
-  http.setTimeout(5000);
-  int code = http.GET();
-  String resp = http.getString();
-  Serial.printf("mappings HTTP code=%d resp=%s\n", code, resp.c_str());
-  if (code == 200) {
-#ifdef USE_ARDUINOJSON
-    DynamicJsonDocument doc(JSON_DOC_SIZE);
-    DeserializationError err = deserializeJson(doc, resp);
-    if (!err) {
-      JsonArray arr;
-      if (doc.is<JsonArray>()) arr = doc.as<JsonArray>();
-      else if (doc.containsKey("data") && doc["data"].is<JsonArray>()) arr = doc["data"].as<JsonArray>();
-      if (!arr.isNull()) {
-        prefs.begin("finger_map", false);
-        prefs.clear();
-        int saved = 0;
-        for (JsonObject item : arr) {
-          int slot = item["slot"] | 0;
-          const char* emp = item["employee_code"] | nullptr;
-          if (slot > 0 && emp && strlen(emp) > 0) {
-            prefs.putString((String("s") + slot).c_str(), String(emp));
-            Serial.printf("Saved mapping: slot %d -> %s\n", slot, emp);
-            saved++;
-          }
-        }
-        prefs.end();
-        Serial.printf("fetchMappingsAndSave: saved %d mappings\n", saved);
-      }
-    } else {
-      Serial.print("JSON parse error: "); Serial.println(err.c_str());
-    }
-#else
-    // Lightweight fallback parser
-    int saved = 0;
-    prefs.begin("finger_map", false);
-    prefs.clear();
-    String s = resp; int pos = 0;
-    while (true) {
-      int posSlot = s.indexOf("\"slot\"", pos); if (posSlot == -1) break;
-      int colon = s.indexOf(':', posSlot); if (colon == -1) break;
-      int i = colon + 1; while (i < s.length() && (s.charAt(i)==' '||s.charAt(i)=='\"')) i++;
-      int j = i; while (j < s.length() && isDigit(s.charAt(j))) j++;
-      int slot = s.substring(i, j).toInt();
-      int posEmp = s.indexOf("\"employee_code\"", j); if (posEmp == -1) { pos = j; continue; }
-      int colonEmp = s.indexOf(':', posEmp); if (colonEmp == -1) { pos = j; continue; }
-      int start = colonEmp + 1; while (start < s.length() && (s.charAt(start)==' '||s.charAt(start)=='\"')) start++;
-      int end = start; while (end < s.length() && s.charAt(end)!='"' && s.charAt(end)!=',' && s.charAt(end)!='}') end++;
-      String emp = s.substring(start, end); emp.trim();
-      if (slot > 0 && emp.length() > 0) {
-        prefs.putString((String("s") + slot).c_str(), emp);
-        Serial.printf("Saved mapping: slot %d -> %s\n", slot, emp.c_str());
-        saved++;
-      }
-      pos = j;
-    }
-    prefs.end();
-    Serial.printf("fetchMappingsAndSave (fallback): saved %d mappings\n", saved);
-#endif
-  }
-  http.end();
-}
-
-int requestNextFreeSlotFromServer() {
-  if (WiFi.status() != WL_CONNECTED) return -1;
-  HTTPClient http;
-  http.begin(API_BASE + "/devices/next-finger-slot");
-  http.addHeader("X-Device-Token", DEVICE_TOKEN);
-  http.addHeader("Accept","application/json");
-  String sig = buildSignatureForJson("");
-  Serial.print("next-finger-slot signature: "); Serial.println(sig);
-  http.addHeader("X-Device-Signature", sig);
-  int code = http.GET();
-  String resp = http.getString();
-  Serial.printf("nextSlot HTTP code: %d resp: %s\n", code, resp.c_str());
-  if (code == 200) {
-    int idx = resp.indexOf("\"slot\"");
-    if (idx >= 0) {
-      int colon = resp.indexOf(':', idx);
-      int comma = resp.indexOf('}', colon);
-      String num = resp.substring(colon+1, (comma==-1?resp.length():comma));
-      num.trim();
-      int slot = num.toInt();
-      http.end();
-      return slot;
-    }
-  }
-  http.end();
-  return -1;
-}
-
-// =========================
-// Slot management
-// =========================
-int freeOneUnmappedSlot() {
-  Serial.println("freeOneUnmappedSlot: scanning for unmapped occupied slot...");
-  prefs.begin("finger_map", true);
-  for (int i = 1; i <= MAX_FINGER_SLOTS; ++i) {
-    int r = finger.loadModel(i);
-    if (r == FINGERPRINT_OK) {
-      String mapped = prefs.getString((String("s") + i).c_str(), "");
-      if (mapped.length() == 0) {
-        prefs.end();
-        Serial.printf("Deleting unmapped slot %d\n", i);
-        int del = finger.deleteModel(i);
-        if (del == FINGERPRINT_OK) { Serial.printf("Deleted slot %d OK\n", i); return i; }
-        else { Serial.printf("deleteModel(%d) -> %d\n", i, del); }
-        prefs.begin("finger_map", true); // re-open for loop continuity
-      }
-    }
-    delay(5);
-  }
-  prefs.end();
-  Serial.println("freeOneUnmappedSlot: none found");
-  return -1;
-}
-
-// NEW tolerant free-slot finder (fixes "No slot" on quirky sensors)
-int findLocalFreeSlot() {
-  int cnt = finger.getTemplateCount();
-  Serial.printf("findLocalFreeSlot: sensor getTemplateCount -> %d\n", cnt);
-  for (int i = 1; i <= MAX_FINGER_SLOTS; ++i) {
-    int r = finger.loadModel(i);
-    if (r == FINGERPRINT_OK) {
-      // occupied
-    } else {
-      // Many modules return various codes for empty cells; any non-OK => consider FREE
-      Serial.printf("findLocalFreeSlot: slot %d considered FREE (loadModel=%d)\n", i, r);
-      return i;
-    }
-    delay(4);
-  }
-  Serial.println("findLocalFreeSlot: no free slot in 1..MAX_FINGER_SLOTS");
-  return -1;
-}
-
-int getSlotOrFree() {
-  // 1) Prefer LOCAL (fast, offline)
-  int slot = findLocalFreeSlot();
-  if (slot >= 0) return slot;
-
-  // 2) Try server coordination
-  slot = requestNextFreeSlotFromServer();
-  if (slot >= 0) return slot;
-
-  // 3) Optionally free an unmapped occupied slot
-  if (autoOverwriteUnmappedSlots) {
-    int freed = freeOneUnmappedSlot();
-    if (freed > 0) return freed;
-  }
-  return -1;
-}
-
-// =========================
-// Fingerprint ops
-// =========================
-int identifyFingerprint() {
-  int imgStatus = finger.getImage();
-  if (imgStatus != FINGERPRINT_OK) {
-    if (verboseGetImage) Serial.printf("getImage status: %d\n", imgStatus);
-    return -1;
-  }
-  show("Dang quet"," ");
-  Serial.println("Finger detected, converting image...");
-
-  int conv = finger.image2Tz(1);
-  Serial.printf("image2Tz result: %d\n", conv);
-  if (conv != FINGERPRINT_OK) {
-    show("Quet that bai","TZ err"); beepErr(); delay(700);
-    return -1;
-  }
-
-  Serial.println("Searching templates...");
-  int p = finger.fingerFastSearch();
-  Serial.printf("fingerFastSearch result: %d\n", p);
-  if (p == FINGERPRINT_OK) {
-    int id = finger.fingerID;
-    int score = finger.confidence;
-    Serial.printf("Fingerprint found: id=%d score=%d\n", id, score);
-    show("Quet xong", "ID:" + String(id)); beepOK(); delay(700);
-    return id;
-  } else {
-    Serial.println("Fingerprint not found");
-    show("Khong tim thay"," "); beepErr(); delay(700);
-    return -1;
-  }
-}
-
-bool reportEnrollToServer(const String &employeeCode, int slot) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  String body = "{\"employee_code\":\"" + employeeCode + "\",\"finger_id\":" + String(slot) + "}";
-  String sig = buildSignatureForJson(body);
-  Serial.print("reportEnrollToServer body: "); Serial.println(body);
-  Serial.print("reportEnroll signature: "); Serial.println(sig);
-  HTTPClient http;
-  http.begin(API_BASE + "/devices/enroll");
-  http.addHeader("Content-Type","application/json");
-  http.addHeader("Accept","application/json");
-  http.addHeader("X-Device-Token", DEVICE_TOKEN);
-  http.addHeader("X-Device-Signature", sig);
-  http.setTimeout(5000);
-  int code = http.POST((uint8_t*)body.c_str(), body.length());
-  String resp = http.getString();
-  Serial.printf("Enroll HTTP code: %d\n", code);
-  Serial.println(resp);
-  http.end();
-  bool ok = (code == 200);
-  if (ok) {
-    prefs.begin("finger_map", false);
-    prefs.putString((String("s") + slot).c_str(), employeeCode);
-    prefs.end();
-    Serial.printf("Saved mapping: slot %d -> %s\n", slot, employeeCode.c_str());
-  }
-  return ok;
-}
-
-String getMappingForSlot(int slot) {
-  prefs.begin("finger_map", true);
-  String v = prefs.getString((String("s") + slot).c_str(), "");
-  prefs.end();
-  return v;
-}
-
-void listMappings() {
-  Serial.println("Saved fingerprint mappings:");
-  prefs.begin("finger_map", true);
-  for (int i = 1; i <= MAX_FINGER_SLOTS; ++i) {
-    String v = prefs.getString((String("s") + i).c_str(), "");
-    if (v.length() > 0) Serial.printf("  slot %d -> %s\n", i, v.c_str());
-  }
-  prefs.end();
-}
-
-void sendPunchForSlot(int slot) {
-  String emp = getMappingForSlot(slot);
-  if (emp.length() == 0) {
-    Serial.printf("No mapping for slot %d\n", slot);
-    return;
-  }
-  Serial.printf("Triggering punch: slot %d -> %s\n", slot, emp.c_str());
-  if (!sendPunch(emp, "IN", "FINGERPRINT")) {
-    Serial.println("sendPunch failed");
-  }
-}
-
-bool enrollFingerprintForEmployee(const String &employeeCode) {
-  show("Enrolling...", employeeCode);
-  int slot = getSlotOrFree();
-  if (slot < 0) {
-    Serial.println("No free slot available");
-    show("Enroll FAIL","No slot"); beepErr();
-    return false;
-  }
-  Serial.printf("Using slot %d\n", slot);
-
-  show("Place finger 1"," ");
-  while (finger.getImage() != FINGERPRINT_OK) { delay(200); }
-  if (finger.image2Tz(1) != FINGERPRINT_OK) { show("Err","TZ1"); beepErr(); return false; }
-
-  show("Place finger 2"," ");
-  while (finger.getImage() != FINGERPRINT_OK) { delay(200); }
-  if (finger.image2Tz(2) != FINGERPRINT_OK) { show("Err","TZ2"); beepErr(); return false; }
-
-  if (finger.createModel() != FINGERPRINT_OK) { show("Create model","Fail"); beepErr(); return false; }
-  if (finger.storeModel(slot) != FINGERPRINT_OK) { show("Store model","Fail"); beepErr(); return false; }
-
-  bool ok = reportEnrollToServer(employeeCode, slot);
-  if (ok) { show("Enroll OK", employeeCode); beepOK(); return true; }
-  else    { show("Enroll FAIL","srv"); beepErr(); return false; }
-}
-
-// Enhanced temp-enroll with quick mapping sync window
-void performTempEnroll2() {
-  const unsigned long PRESENT_TIMEOUT_MS = 60000;
-  const unsigned long ABSENT_TIMEOUT_MS  = 20000;
-  const int POST_RETRIES = 3;
-  const unsigned long RETRY_BUTTON_WINDOW_MS = 10000;
-
-  Serial.println("performTempEnroll2: start");
-  show("Them van tay moi","Waiting for finger...");
-
-  int slot = getSlotOrFree();
-  if (slot < 0) { show("No slot"," "); beepErr(); Serial.println("No slot available"); return; }
-  Serial.printf("Temp-enroll using slot %d\n", slot);
-
-  bool retryOuter = false;
-  do {
-    retryOuter = false;
-
-    // First capture
-    show("Them van tay moi","Dua tay vao...");
-    unsigned long t0 = millis(); bool got=false;
-    while (millis() - t0 < PRESENT_TIMEOUT_MS) {
-      int s = finger.getImage(); if (s == FINGERPRINT_OK) { got=true; break; }
-      if (s == FINGERPRINT_NOFINGER) { delay(120); continue; }
-      if (verboseGetImage) Serial.printf("getImage wait1: %d\n", s);
-      delay(120);
-    }
-    if (!got) { show("Timeout","No finger"); beepErr(); Serial.println("Timeout wait 1"); return; }
-    if (finger.image2Tz(1) != FINGERPRINT_OK) {
-      show("Err","TZ1"); beepErr(); Serial.println("image2Tz(1) failed");
-      show("Loi mau 1","Bam nut de thu"); unsigned long st=millis(); bool pressed=false;
-      while (millis()-st < RETRY_BUTTON_WINDOW_MS) { if (digitalRead(ENROLL_BUTTON_PIN)==LOW) { pressed=true; break; } delay(50); }
-      if (pressed) { retryOuter = true; continue; } else return;
-    }
-    show("Hoan tat luot 1","Bo tay ra"); beepOK(); delay(700);
-
-    // Wait absent
-    unsigned long t1 = millis();
-    while (millis() - t1 < ABSENT_TIMEOUT_MS) { if (finger.getImage() == FINGERPRINT_NOFINGER) break; delay(120); }
-
-    // Second capture
-    show("Dat lai ngon tay","Lan 2");
-    t0 = millis(); got=false;
-    while (millis() - t0 < PRESENT_TIMEOUT_MS) {
-      int s = finger.getImage(); if (s == FINGERPRINT_OK) { got=true; break; }
-      if (s == FINGERPRINT_NOFINGER) { delay(120); continue; }
-      if (verboseGetImage) Serial.printf("getImage wait2: %d\n", s);
-      delay(120);
-    }
-    if (!got) { show("Timeout","No finger 2"); beepErr(); Serial.println("Timeout wait 2"); return; }
-    if (finger.image2Tz(2) != FINGERPRINT_OK) {
-      show("Err","TZ2"); beepErr(); Serial.println("image2Tz(2) failed");
-      show("Loi mau 2","Bam nut de thu"); unsigned long st2=millis(); bool pressed2=false;
-      while (millis()-st2 < RETRY_BUTTON_WINDOW_MS) { if (digitalRead(ENROLL_BUTTON_PIN)==LOW) { pressed2=true; break; } delay(50); }
-      if (pressed2) { retryOuter = true; continue; } else return;
-    }
-    show("Hoan tat luot 2","Dang xu ly..."); delay(500);
-
-    int model = finger.createModel();
-    if (model != FINGERPRINT_OK) {
-      show("Tao mau that bai","Bam nut thu lai"); beepErr(); Serial.printf("createModel failed: %d\n", model);
-      unsigned long st3=millis(); bool pressed3=false;
-      while (millis()-st3 < RETRY_BUTTON_WINDOW_MS) { if (digitalRead(ENROLL_BUTTON_PIN)==LOW) { pressed3=true; break; } delay(50); }
-      if (pressed3) { retryOuter = true; continue; } else return;
-    }
-    int store = finger.storeModel(slot);
-    if (store != FINGERPRINT_OK) { show("Luu that bai"," "); beepErr(); Serial.printf("storeModel failed: %d\n", store); return; }
-    show("Luu thanh cong","Slot:" + String(slot)); beepOK(); delay(500);
-
-    // Report temp enroll (slot) to server
-    bool reported=false;
-    if (WiFi.status() == WL_CONNECTED) {
-      String body = "{\"finger_id\": " + String(slot) + "}";
-      String sig = buildSignatureForJson(body);
-      Serial.print("enroll-temp body: "); Serial.println(body); Serial.print("sig: "); Serial.println(sig);
-      for (int a=1; a<=POST_RETRIES; ++a) {
-        HTTPClient http; http.begin(API_BASE + "/devices/enroll-temp");
-        http.addHeader("Content-Type","application/json");
-        http.addHeader("Accept","application/json");
-        http.addHeader("X-Device-Token", DEVICE_TOKEN);
-        http.addHeader("X-Device-Signature", sig);
-        http.setTimeout(5000);
-        int code = http.POST((uint8_t*)body.c_str(), body.length());
-        String resp = http.getString(); http.end();
-        Serial.printf("enroll-temp attempt %d code=%d resp=%s\n", a, code, resp.c_str());
-        if (code == 200) { reported=true; break; }
-        delay(700);
-      }
-    }
-
-    if (reported) {
-      show("Da gui, cho duyet","tren Web (60s)"); beepOK();
-      // Start quick sync window
-      lastEnrolledSlotPending = slot;
-      lastEnrollSyncUntil = millis() + 60000UL;
-      lastMapShortPoll = 0;
-    } else {
-      show("Luu tam & cho mang","Web duyet sau"); beepErr();
-      addPendingEnrollSlot(slot);
-      // Still allow quick sync window (in case mapping appears soon)
-      lastEnrolledSlotPending = slot;
-      lastEnrollSyncUntil = millis() + 60000UL;
-      lastMapShortPoll = 0;
-    }
-
-  } while (retryOuter);
-}
-
-// =========================
-// Pending queue helpers
-// =========================
-void addPendingEnrollSlot(int slot) {
-  prefs.begin("pending_enrolls", false);
-  String cur = prefs.getString("slots", "");
-  bool exists = false;
-  if (cur.length() > 0) {
-    int idx = 0;
-    while (idx < cur.length()) {
-      int comma = cur.indexOf(',', idx);
-      String token = (comma==-1) ? cur.substring(idx) : cur.substring(idx, comma);
-      token.trim();
-      if (token == String(slot)) { exists = true; break; }
-      idx = (comma==-1) ? cur.length() : comma + 1;
-    }
-  }
-  if (!exists) {
-    if (cur.length() > 0) cur += ",";
-    cur += String(slot);
-    prefs.putString("slots", cur);
-    Serial.printf("Queued pending enroll slot: %d (now: %s)\n", slot, cur.c_str());
-  } else {
-    Serial.printf("Slot %d already in pending queue\n", slot);
-  }
-  prefs.end();
-}
-
-void resendPendingEnrolls() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  prefs.begin("pending_enrolls", false);
-  String cur = prefs.getString("slots", "");
-  if (cur.length() == 0) { prefs.end(); return; }
-  Serial.printf("Resend pending enrolls: %s\n", cur.c_str());
-  int idx = 0;
-  while (idx < cur.length()) {
-    int comma = cur.indexOf(',', idx);
-    String token = (comma==-1) ? cur.substring(idx) : cur.substring(idx, comma);
-    idx = (comma==-1) ? cur.length() : comma + 1;
-    token.trim();
-    if (token.length() == 0) continue;
-    int slot = token.toInt();
-
-    String body = "{\"finger_id\": " + String(slot) + "}";
-    String sig = buildSignatureForJson(body);
-    HTTPClient http; http.begin(API_BASE + "/devices/enroll-temp");
-    http.addHeader("Content-Type","application/json");
-    http.addHeader("Accept","application/json");
-    http.addHeader("X-Device-Token", DEVICE_TOKEN);
-    http.addHeader("X-Device-Signature", sig);
-    http.setTimeout(5000);
-    int code = http.POST((uint8_t*)body.c_str(), body.length());
-    String resp = http.getString(); http.end();
-    Serial.printf("Resend slot %d -> code=%d resp=%s\n", slot, code, resp.c_str());
-
-    if (code == 200) {
-      // remove first occurrence
-      String toRemove = String(slot);
-      int pos = cur.indexOf(toRemove);
-      if (pos >= 0) {
-        int len = toRemove.length();
-        cur = cur.substring(0, pos) + ((pos+len < cur.length() && cur.charAt(pos+len)==',') ? cur.substring(pos+len+1) : cur.substring(pos+len));
-      }
-      prefs.putString("slots", cur);
-      Serial.printf("Resend success, queue now: %s\n", cur.c_str());
-    } else {
-      Serial.println("Resend failed, stop and retry later");
-      break;
-    }
-  }
-  prefs.end();
-}
-
-// =========================
-void printDiagnostics() {
-  Serial.println("=== DEVICE DIAGNOSTICS ===");
-  Serial.print("Firmware: "); Serial.println(FIRMWARE_VER);
-  Serial.print("API_BASE: "); Serial.println(API_BASE);
-  Serial.print("WiFi status: "); Serial.println(WiFi.status());
-  if (WiFi.status() == WL_CONNECTED) { Serial.print("IP: "); Serial.println(WiFi.localIP()); }
-  Serial.print("Sticky failure: "); Serial.println(stickyFailure?"true":"false");
-
-  int cnt = finger.getTemplateCount();
-  Serial.printf("Template count: %d\n", cnt);
-
-  Serial.println("-- Probe occupied slots (1..MAX) --");
-  int found = 0;
-  for (int i = 1; i <= MAX_FINGER_SLOTS; ++i) {
-    int r = finger.loadModel(i);
-    if (r == FINGERPRINT_OK) { Serial.printf("  slot %d: OCCUPIED\n", i); found++; }
-    else if (r == FINGERPRINT_NOTFOUND) { /* free */ }
-    else { Serial.printf("  slot %d: code %d (likely FREE)\n", i, r); }
-    delay(10);
-  }
-  Serial.printf("Occupied (probe): %d\n", found);
-
-  prefs.begin("finger_map", true);
-  int mapped = 0;
-  for (int i = 1; i <= MAX_FINGER_SLOTS; ++i) {
-    String v = prefs.getString((String("s") + i).c_str(), "");
-    if (v.length() > 0) { Serial.printf("  map %d -> %s\n", i, v.c_str()); mapped++; }
-  }
-  prefs.end();
-  Serial.printf("Mappings saved: %d\n", mapped);
-
-  prefs.begin("pending_enrolls", true);
-  String pending = prefs.getString("slots", "");
-  prefs.end();
-  Serial.print("autoReportTempEnroll: "); Serial.println(autoReportTempEnroll?"true":"false");
-  Serial.print("autoOverwriteUnmappedSlots: "); Serial.println(autoOverwriteUnmappedSlots?"true":"false");
-  Serial.print("Pending enroll slots: "); Serial.println(pending.length()?pending:"(empty)");
-
-  int srv = requestNextFreeSlotFromServer();
-  Serial.printf("Server next-finger-slot: %d\n", srv);
-  Serial.println("=== END DIAGNOSTICS ===");
-}
-
-// =========================
-// Setup / Loop
-// =========================
-void setupCamera() {
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer   = LEDC_TIMER_0;
-  config.pin_d0 = CAM_Y2;  config.pin_d1 = CAM_Y3;  config.pin_d2 = CAM_Y4;  config.pin_d3 = CAM_Y5;
-  config.pin_d4 = CAM_Y6;  config.pin_d5 = CAM_Y7;  config.pin_d6 = CAM_Y8;  config.pin_d7 = CAM_Y9;
-  config.pin_xclk = CAM_XCLK; config.pin_pclk = CAM_PCLK;
-  config.pin_vsync = CAM_VSYNC; config.pin_href = CAM_HREF;
-  config.pin_sccb_sda = CAM_SIOD; config.pin_sccb_scl = CAM_SIOC;
-  config.pin_pwdn = CAM_PWDN; config.pin_reset = CAM_RESET;
-  config.xclk_freq_hz = 20000000; config.pixel_format = PIXFORMAT_JPEG;
-  if (psramFound()) { config.frame_size = FRAMESIZE_QVGA; config.jpeg_quality = 12; config.fb_count = 2; }
-  else              { config.frame_size = FRAMESIZE_QVGA; config.jpeg_quality = 16; config.fb_count = 1; }
-
-  Serial.print("psramFound: "); Serial.println(psramFound() ? "true" : "false");
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed: 0x%x (%s)\n", err, esp_err_to_name(err));
-    show("Loi camera"," "); beepErr();
-    Serial.println("Fallback camera init...");
-    config.frame_size = FRAMESIZE_QQVGA; config.jpeg_quality = 18; config.fb_count = 1;
-    esp_err_t err2 = esp_camera_init(&config);
-    if (err2 != ESP_OK) { Serial.printf("Fallback failed: 0x%x (%s)\n", err2, esp_err_to_name(err2)); delay(1000); }
-    else { Serial.println("Fallback camera init OK"); }
-  }
-}
+#include <LiquidCrystal_I2C.h>
+
+// ========== CẤU HÌNH ==========
+// WiFi
+const char* ssid = "?";
+const char* password = "?";
+
+// Backend Server (HTTP cho checkin)
+const char* SERVER_URL = "?";
+const char* DEVICE_NAME = "ESP32-AS608-01";
+
+// MQTT Broker
+const char* MQTT_BROKER = "broker.hivemq.com";
+const int MQTT_PORT = 1883;
+const char* MQTT_USER = "";
+const char* MQTT_PASS = "";
+
+// MQTT Topics
+String TOPIC_COMMAND = String("iot/device/") + DEVICE_NAME + "/command";
+String TOPIC_ENROLL_RESULT = String("iot/device/") + DEVICE_NAME + "/enroll/result";
+String TOPIC_HEARTBEAT = String("iot/device/") + DEVICE_NAME + "/heartbeat";
+String TOPIC_POWER_STATUS = String("iot/device/") + DEVICE_NAME + "/power/status";
+
+// Hardware Pins
+#define RELAY_PIN 4           // GPIO4 điều khiển relay
+#define AS608_RX 7           // GPIO42 -> AS608 TX (Vàng)
+#define AS608_TX 15           // GPIO41 -> AS608 RX (Trắng)
+#define LCD_SDA 1             // GPIO1 -> LCD SDA (Changed from 5)
+#define LCD_SCL 2             // GPIO2 -> LCD SCL (Changed from 6)
+
+// Hardware
+HardwareSerial mySerial(1);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// MQTT Client
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+// Biến trạng thái
+bool hasLCD = false;
+bool powerStatus = false;      // Trạng thái nguồn (false = OFF, true = ON)
+unsigned long lastHeartbeat = 0;
+const unsigned long HEARTBEAT_INTERVAL = 60000;
+
+// Attendance management
+struct AttendanceRecord {
+  int fingerID;
+  int isCheckin;
+  unsigned long lastCheckTime;
+};
+
+AttendanceRecord attendanceLog[127];
+int currentDay = 0;
 
 void setup() {
   Serial.begin(115200);
-  lcd.begin(16,2);
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(STATUS_LED_PIN, OUTPUT);
-  pinMode(ENROLL_BUTTON_PIN, INPUT_PULLUP);
-  digitalWrite(STATUS_LED_PIN, LOW);
-  stickyFailure = false;
-  show("Khoi dong...", FIRMWARE_VER);
-  delay(500);
+  delay(100);
+  Serial.println("\n\n=== ESP32 AS608 Attendance System (With Power Control) ===");
 
-  // Decode DEVICE_KEY (hex or raw ASCII)
-  if (hexToBytes(DEVICE_KEY, DEVICE_KEY_BYTES, DEVICE_KEY_BYTES_LEN)) {
-    Serial.printf("DEVICE_KEY hex (%u bytes)\n", (unsigned)DEVICE_KEY_BYTES_LEN);
-  } else {
-    size_t rawLen = DEVICE_KEY.length(); if (rawLen > sizeof(DEVICE_KEY_BYTES)) rawLen = sizeof(DEVICE_KEY_BYTES);
-    for (size_t i=0;i<rawLen;++i) DEVICE_KEY_BYTES[i] = (uint8_t)DEVICE_KEY.charAt(i);
-    DEVICE_KEY_BYTES_LEN = rawLen;
-    Serial.printf("DEVICE_KEY raw ASCII (%u bytes)\n", (unsigned)DEVICE_KEY_BYTES_LEN);
-  }
+  // Cấu hình relay pin
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);  // Relay OFF ban đầu (LOW = mở relay = không cấp nguồn)
+  powerStatus = false;
+  
+  Serial.println("✓ Relay initialized (Power OFF)");
 
-  // WiFi
-  show("Dang ket noi..."," ");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(300); }
-  if (WiFi.status() == WL_CONNECTED) {
-    String ip = WiFi.localIP().toString();
-    show("WiFi OK", ip);
-    Serial.print("WiFi connected, IP: "); Serial.println(ip);
-    delay(400); blinkLED(2, 120);
-    bool ok = healthCheck();
-    Serial.printf("Health-check: %s\n", ok?"OK":"FAIL");
-    if (ok) {
-      Serial.println("Fetching mappings after connect...");
-      delay(200);
-      fetchMappingsAndSave();
-      Serial.println("Resend pending enrolls...");
-      resendPendingEnrolls();
-    }
-  } else {
-    show("WiFi FAIL"," "); Serial.println("WiFi connect failed!"); beepErr();
-  }
+  // Kết nối WiFi
+  connectWiFi();
 
-  // AS608
-  SerialAS608.begin(57600, SERIAL_8N1, AS608_RX, AS608_TX);
-  finger.begin(57600);
-  if (finger.verifyPassword()) { Serial.println("AS608 OK"); show("AS608 OK"," "); }
-  else { Serial.println("AS608 FAIL"); show("AS608 FAIL"," "); beepErr(); delay(1200); }
+  // Kết nối MQTT
+  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  connectMQTT();
 
-  setupCamera();
-  delay(400);
-  loadDeviceSettings();
-  show("Ready","Moi quet van tay");
+  // Thông báo sẵn sàng
+  Serial.println("System ready. Waiting for power ON command...");
+  Serial.println("Send MQTT command: {\"action\": \"power_on\"}");
 }
 
-// =========================
 void loop() {
-  // keep display alive
-  static unsigned long lastIdle = 0;
-  if (millis() - lastIdle > 5000) { show("Moi quet van tay"," "); lastIdle = millis(); }
-
-  // auto-reconnect WiFi
+  // Reconnect nếu mất kết nối
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi lost, reconnecting...");
-    WiFi.reconnect();
-    unsigned long t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) { delay(200); }
-    if (WiFi.status() == WL_CONNECTED) { Serial.println("WiFi reconnected"); show("WiFi reconnected"," "); blinkLED(2, 100); delay(200); healthCheck(); }
-    else { Serial.println("Reconnect failed"); show("No WiFi"," "); digitalWrite(STATUS_LED_PIN, HIGH); }
+    connectWiFi();
   }
-
-  // Serial commands
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n'); line.trim();
-    if (line.length()>0 && line.charAt(0)=='E') {
-      String empCode = line.substring(1); Serial.printf("Enroll command for %s\n", empCode.c_str()); enrollFingerprintForEmployee(empCode);
+  
+  if (!mqttClient.connected()) {
+    connectMQTT();
+  }
+  
+  mqttClient.loop();
+  
+  // Heartbeat qua MQTT
+  if (millis() - lastHeartbeat > HEARTBEAT_INTERVAL) {
+    sendHeartbeat();
+    lastHeartbeat = millis();
+  }
+  
+  // Chỉ hoạt động khi nguồn BẬT
+  if (powerStatus) {
+    checkAndResetDaily();
+    
+    // Quét vân tay để chấm công
+    int fingerId = getFingerprintID();
+    
+    if (fingerId >= 0) {
+      handleCheckin(fingerId);
     }
-    if (line.length() > 0) {
-      if (line == "M") listMappings();
-      else if (line.startsWith("P")) { int slot = line.substring(1).toInt(); if (slot>0) sendPunchForSlot(slot); }
-      else if (line.startsWith("D")) { int slot = line.substring(1).toInt(); if (slot>0){ Serial.printf("Delete slot %d...\n", slot); int r=finger.deleteModel(slot); if (r==FINGERPRINT_OK) Serial.println("Delete OK"); else Serial.printf("Delete returned %d\n", r);} }
-      else if (line == "C") {
-        Serial.println("CLEAR ALL 1..MAX_FINGER_SLOTS (confirm Y)"); unsigned long now=millis();
-        while (millis()-now < 5000 && !Serial.available()) delay(50);
-        if (Serial.available()) { String conf=Serial.readStringUntil('\n'); conf.trim();
-          if (conf=="Y"||conf=="y"){ int deleted=0; for (int i=1;i<=MAX_FINGER_SLOTS;++i){int r=finger.deleteModel(i); if (r==FINGERPRINT_OK) deleted++; delay(15);} Serial.printf("Deleted %d templates\n", deleted);}
-          else Serial.println("Clear aborted");
-        } else Serial.println("Abort: no confirmation");
+  }
+  
+  delay(50);
+}
+
+// ========== POWER CONTROL FUNCTIONS ==========
+
+bool scanI2CDevice(uint8_t address) {
+  Wire.beginTransmission(address);
+  byte error = Wire.endTransmission();
+  return (error == 0);
+}
+
+void powerOn() {
+  if (powerStatus) {
+    Serial.println("[POWER] Already ON");
+    return;
+  }
+  
+  Serial.println("[POWER] Turning ON...");
+  
+  // Bật relay (HIGH = đóng relay = cấp nguồn qua GND)
+  digitalWrite(RELAY_PIN, HIGH);
+  powerStatus = true;
+  
+  Serial.println("[POWER] Relay activated, waiting for power stabilization...");
+  delay(2000);  // Chờ nguồn ổn định lâu hơn
+  
+  // Khởi động AS608 trước (không cần I2C)
+  Serial.println("[POWER] Initializing AS608...");
+  mySerial.begin(57600, SERIAL_8N1, AS608_RX, AS608_TX);
+  delay(500);
+  
+  if (finger.verifyPassword()) {
+    Serial.println("✓ AS608 Connected!");
+  } else {
+    Serial.println("✗ AS608 Not Found!");
+  }
+  
+  // Khởi động LCD sau cùng (cần I2C)
+  Serial.println("[POWER] Initializing I2C Bus...");
+  Wire.begin(LCD_SDA, LCD_SCL);
+  delay(300);
+  
+  // Scan I2C để tìm LCD
+  Serial.println("[POWER] Scanning I2C devices...");
+  bool lcdFound = scanI2CDevice(0x27);
+  
+  if (!lcdFound) {
+    Serial.println("⚠ LCD not found at 0x27, trying 0x3F...");
+    lcdFound = scanI2CDevice(0x3F);
+  }
+  
+  if (lcdFound) {
+    Serial.println("✓ LCD detected on I2C bus");
+    
+    // Khởi tạo LCD với retry
+    int lcdRetry = 0;
+    while (lcdRetry < 3) {
+      lcd.init();
+      delay(100);
+      lcd.backlight();
+      delay(100);
+      
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Starting...");
+      
+      hasLCD = true;
+      Serial.println("✓ LCD initialized!");
+      break;
+      
+      lcdRetry++;
+      if (lcdRetry < 3) {
+        Serial.println("Retrying LCD init...");
+        delay(500);
       }
-      else if (line == "L") { prefs.begin("finger_map", false); prefs.clear(); prefs.end(); Serial.println("Cleared mappings"); }
-      else if (line == "S") { Serial.println("Manual scan (S)"); int found = identifyFingerprint(); if (found>0) Serial.printf("Manual scan: slot %d\n", found); else Serial.println("No match / no finger"); }
-      else if (line == "T") { Serial.println("Query template count (T)..."); int cnt=finger.getTemplateCount(); Serial.printf("Template count: %d\n", cnt); int freeSlot=findLocalFreeSlot(); if (freeSlot>0) Serial.printf("Quick free slot: %d\n", freeSlot); else Serial.println("No free slot found"); }
-      else if (line == "DIAG") { Serial.println("Running diagnostics..."); printDiagnostics(); }
-      else if (line == "R") { Serial.println("Manual resend (R)"); resendPendingEnrolls(); }
-      else if (line == "V") { verboseGetImage=!verboseGetImage; Serial.printf("Verbose: %s\n", verboseGetImage?"ON":"OFF"); }
-      else if (line == "A") { autoReportTempEnroll=!autoReportTempEnroll; saveDeviceSettings(); Serial.printf("autoReportTempEnroll: %s\n", autoReportTempEnroll?"ON":"OFF"); }
-      else if (line == "O") { autoOverwriteUnmappedSlots=!autoOverwriteUnmappedSlots; saveDeviceSettings(); Serial.printf("autoOverwriteUnmappedSlots: %s\n", autoOverwriteUnmappedSlots?"ON":"OFF"); }
-      else if (line == "B") { Serial.println("Manual temp-enroll (B)"); performTempEnroll2(); }
-      else if (line == "F") { Serial.println("Force fetch mappings (F)"); fetchMappingsAndSave(); }
     }
+    
+    if (lcdRetry >= 3) {
+      Serial.println("⚠ LCD init failed after retries");
+      hasLCD = false;
+    }
+  } else {
+    Serial.println("⚠ LCD not detected, continuing without LCD");
+    hasLCD = false;
+  }
+  
+  delay(1000);
+  
+  // Hiển thị thông tin
+  finger.getTemplateCount();
+  Serial.print("Fingerprints: ");
+  Serial.println(finger.templateCount);
+  
+  if (hasLCD) {
+    delay(1000);
+    lcd.clear();
+    lcd.print("AS608: OK");
+    lcd.setCursor(0, 1);
+    lcd.print("Fingers: ");
+    lcd.print(finger.templateCount);
+    delay(2000);
   }
 
-  // Double-press enroll button for temp-enroll
-  static unsigned long lastPress = 0; static int pressCount = 0;
-  if (digitalRead(ENROLL_BUTTON_PIN) == LOW) {
-    Serial.printf("Enroll button press at %lu\n", millis());
-    unsigned long now = millis();
-    if (now - lastPress < 1000) pressCount++; else pressCount = 1;
-    lastPress = now;
-    while (digitalRead(ENROLL_BUTTON_PIN) == LOW) delay(10);
-    if (pressCount >= 2) { Serial.println("Double-press -> temp-enroll"); performTempEnroll2(); pressCount = 0; }
-  }
+  resetAttendanceLog();
+  displayReady();
+  
+  Serial.println("✓ Power ON complete");
+  
+  // Gửi trạng thái lên server
+  sendPowerStatus();
+}
 
-  // Auto-detect finger
-  static unsigned long lastFingerCheck = 0;
-  if (millis() - lastFingerCheck > 300) {
-    lastFingerCheck = millis();
-    int slot = identifyFingerprint();
-    if (slot > 0) {
-      String emp = getMappingForSlot(slot);
-      unsigned long now = millis();
-      if (emp.length() > 0) {
-        if (slot != lastPunchedSlot || now - lastPunchedAt > PUNCH_DEBOUNCE_MS) {
-          Serial.printf("Auto-punch: slot %d -> %s\n", slot, emp.c_str());
-          show("Cham cong...", emp);
-          sendPunchForSlot(slot);
-          lastPunchedSlot = slot; lastPunchedAt = now;
-        } else {
-          Serial.println("Ignored duplicate punch due to debounce");
+void powerOff() {
+  if (!powerStatus) {
+    Serial.println("[POWER] Already OFF");
+    return;
+  }
+  
+  Serial.println("[POWER] Turning OFF...");
+  
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("Shutting down...");
+    delay(1000);
+    lcd.noBacklight();
+    hasLCD = false;
+  }
+  
+  // Tắt relay (LOW = mở relay = ngắt nguồn)
+  digitalWrite(RELAY_PIN, LOW);
+  powerStatus = false;
+  
+  Serial.println("✓ Power OFF complete");
+  
+  // Gửi trạng thái lên server
+  sendPowerStatus();
+}
+
+void sendPowerStatus() {
+  if (!mqttClient.connected()) {
+    Serial.println("MQTT not connected, sending via HTTP...");
+    sendPowerStatusHTTP();
+    return;
+  }
+  
+  StaticJsonDocument<256> doc;
+  doc["device_name"] = DEVICE_NAME;
+  doc["power_status"] = powerStatus;
+  doc["timestamp"] = millis();
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  bool published = mqttClient.publish(TOPIC_POWER_STATUS.c_str(), payload.c_str());
+  
+  if (published) {
+    Serial.println("[MQTT] ✓ Power status sent");
+  } else {
+    Serial.println("[MQTT] ✗ Failed to send power status");
+    sendPowerStatusHTTP();  // Fallback to HTTP
+  }
+}
+
+void sendPowerStatusHTTP() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  HTTPClient http;
+  String url = String(SERVER_URL) + "/api/device/power-status-report";
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  
+  StaticJsonDocument<256> doc;
+  doc["device_name"] = DEVICE_NAME;
+  doc["power_status"] = powerStatus;
+  
+  String requestBody;
+  serializeJson(doc, requestBody);
+  
+  Serial.println("[HTTP] Sending power status: " + requestBody);
+  
+  int httpCode = http.POST(requestBody);
+  
+  if (httpCode > 0) {
+    Serial.println("[HTTP] ✓ Power status sent");
+  } else {
+    Serial.println("[HTTP] ✗ Failed to send power status");
+  }
+  
+  http.end();
+}
+
+// ========== WIFI FUNCTIONS ==========
+
+void connectWiFi() {
+  Serial.print("Connecting WiFi");
+  
+  WiFi.begin(ssid, password);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✓ WiFi Connected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n✗ WiFi Failed!");
+  }
+}
+
+// ========== MQTT FUNCTIONS ==========
+
+void connectMQTT() {
+  Serial.print("Connecting MQTT...");
+  
+  String clientId = String("ESP32-") + String(random(0xffff), HEX);
+  
+  if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
+    Serial.println(" ✓ Connected!");
+    
+    mqttClient.subscribe(TOPIC_COMMAND.c_str());
+    
+    Serial.println("✓ Subscribed to:");
+    Serial.println("  - " + TOPIC_COMMAND);
+  } else {
+    Serial.print(" ✗ Failed, rc=");
+    Serial.println(mqttClient.state());
+  }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("[MQTT] Message on ");
+  Serial.print(topic);
+  Serial.print(": ");
+  
+  String message;
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.println(message);
+  
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, message);
+  
+  if (error) {
+    Serial.print("JSON parse error: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  
+  if (String(topic) == TOPIC_COMMAND) {
+    const char* action = doc["action"];
+    
+    // ========== POWER CONTROL ==========
+    if (strcmp(action, "power_on") == 0) {
+      Serial.println("[MQTT CMD] Power ON");
+      powerOn();
+    }
+    else if (strcmp(action, "power_off") == 0) {
+      Serial.println("[MQTT CMD] Power OFF");
+      powerOff();
+    }
+    else if (strcmp(action, "get_power_status") == 0) {
+      Serial.println("[MQTT CMD] Get power status");
+      sendPowerStatus();
+    }
+    
+    // ========== AUTO ENROLL ==========
+    else if (strcmp(action, "enroll") == 0) {
+      if (!powerStatus) {
+        Serial.println("[ERROR] Cannot enroll - Power is OFF");
+        return;
+      }
+      
+      int employeeId = doc["employee_id"];
+      const char* employeeName = doc["employee_name"];
+      
+      Serial.print("\n[MQTT CMD] Auto-enroll for Employee ID: ");
+      Serial.print(employeeId);
+      Serial.print(", Name: ");
+      Serial.println(employeeName);
+      
+      performAutoEnrollment(employeeId, employeeName);
+    }
+    
+    // ========== DELETE ==========
+    else if (strcmp(action, "delete") == 0) {
+      if (!powerStatus) {
+        Serial.println("[ERROR] Cannot delete - Power is OFF");
+        return;
+      }
+      
+      int fingerId = doc["fingerprint_id"];
+      Serial.print("[MQTT CMD] Delete fingerprint ID: ");
+      Serial.println(fingerId);
+      
+      uint8_t p = finger.deleteModel(fingerId);
+      if (p == FINGERPRINT_OK) {
+        Serial.println("✓ Deleted successfully");
+        if (hasLCD) {
+          lcd.clear();
+          lcd.print("Deleted ID:");
+          lcd.print(fingerId);
+          delay(2000);
+          displayReady();
         }
-      } else {
-        Serial.printf("Slot %d scanned but no mapping yet\n", slot);
-        show("Chua gan nhan vien","Slot " + String(slot));
-      }
-      delay(500);
-    }
-  }
-
-  // Quick mapping poll for 60 seconds after temp-enroll
-  if (lastEnrolledSlotPending > 0 && millis() < lastEnrollSyncUntil) {
-    if (millis() - lastMapShortPoll > 3000) {
-      lastMapShortPoll = millis();
-      fetchMappingsAndSave();
-      String emp = getMappingForSlot(lastEnrolledSlotPending);
-      if (emp.length() > 0) {
-        show("Map OK", "Slot "+String(lastEnrolledSlotPending)+" -> "+emp);
-        beepOK();
-        Serial.printf("Quick-sync: slot %d mapped to %s\n", lastEnrolledSlotPending, emp.c_str());
-        lastEnrolledSlotPending = -1;
-        lastEnrollSyncUntil = 0;
-      } else {
-        Serial.printf("Quick-sync: slot %d not mapped yet\n", lastEnrolledSlotPending);
       }
     }
-  } else if (millis() >= lastEnrollSyncUntil && lastEnrollSyncUntil != 0) {
-    // end of quick-sync window
-    lastEnrolledSlotPending = -1;
-    lastEnrollSyncUntil = 0;
-    show("Cho quet tiep","Ready");
   }
+}
 
-  // Background resend & periodic mapping sync
-  static unsigned long lastResend = 0;
-  if (millis() - lastResend > 10000) { lastResend = millis(); resendPendingEnrolls(); }
-    const unsigned long MAP_SYNC_INTERVAL_MS = 15000UL; // 15 seconds
-    static unsigned long lastMapSync = 0;
-    if (millis() - lastMapSync > MAP_SYNC_INTERVAL_MS) { lastMapSync = millis(); fetchMappingsAndSave(); }
+void sendHeartbeat() {
+  if (!mqttClient.connected()) return;
+  
+  if (powerStatus) {
+    finger.getTemplateCount();
+  }
+  
+  StaticJsonDocument<256> doc;
+  doc["device"] = DEVICE_NAME;
+  doc["ip"] = WiFi.localIP().toString();
+  doc["rssi"] = WiFi.RSSI();
+  doc["power_status"] = powerStatus;
+  doc["fingerCount"] = powerStatus ? finger.templateCount : 0;
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["timestamp"] = millis();
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  mqttClient.publish(TOPIC_HEARTBEAT.c_str(), payload.c_str());
+  Serial.println("[MQTT] Heartbeat sent");
+}
 
-  delay(200);
+// ========== FINGERPRINT FUNCTIONS ==========
+
+int getFingerprintID() {
+  uint8_t p = finger.getImage();
+  
+  if (p != FINGERPRINT_OK) return -1;
+  
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) return -1;
+  
+  p = finger.fingerFastSearch();
+  if (p != FINGERPRINT_OK) {
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Not Found!");
+      delay(1500);
+      displayReady();
+    }
+    return -1;
+  }
+  
+  return finger.fingerID;
+}
+
+void handleCheckin(int fingerId) {
+  Serial.print("\n[CHECKIN] Finger ID: ");
+  Serial.println(fingerId);
+  
+  int isCheckin = getIsCheckin(fingerId);
+  String checkType = (isCheckin == 1) ? "Check-In" : "Check-Out";
+  
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("ID: ");
+    lcd.print(fingerId);
+    lcd.setCursor(0, 1);
+    lcd.print(checkType);
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected!");
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("WiFi Error!");
+      delay(2000);
+      displayReady();
+    }
+    return;
+  }
+  
+  HTTPClient http;
+  String url = String(SERVER_URL) + "/api/device/checkin";
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  
+  StaticJsonDocument<256> doc;
+  doc["fingerprint_id"] = fingerId;
+  doc["isCheckin"] = isCheckin;
+  doc["device_name"] = DEVICE_NAME;
+  
+  String requestBody;
+  serializeJson(doc, requestBody);
+  
+  Serial.println("Sending: " + requestBody);
+  
+  int httpCode = http.POST(requestBody);
+  
+  if (httpCode > 0) {
+    String response = http.getString();
+    Serial.println("Response: " + response);
+    
+    StaticJsonDocument<512> responseDoc;
+    DeserializationError error = deserializeJson(responseDoc, response);
+    
+    if (!error) {
+      const char* status = responseDoc["status"];
+      const char* name = responseDoc["name"];
+
+      if (hasLCD) {
+        lcd.clear();
+        
+        if (strcmp(status, "success") == 0) {
+          lcd.print(name);
+          lcd.setCursor(0, 1);
+          lcd.print(checkType);
+        } else {
+          lcd.print("Unregistered");
+          lcd.setCursor(0, 1);
+          lcd.print("ID: ");
+          lcd.print(fingerId);
+        }
+        
+        delay(3000);
+        displayReady();
+      }
+      
+      toggleCheckin(fingerId);
+    }
+  } else {
+    Serial.print("HTTP Error: ");
+    Serial.println(httpCode);
+    
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Server Error!");
+      delay(2000);
+      displayReady();
+    }
+  }
+  
+  http.end();
+}
+
+// ========== AUTO ENROLLMENT FUNCTIONS (GIỮ NGUYÊN) ==========
+
+int findEmptySlot() {
+  Serial.println("FINDING EMPTY SLOT");
+  
+  finger.getTemplateCount();
+  Serial.print("Current fingerprints: ");
+  Serial.println(finger.templateCount);
+  Serial.print("Max capacity: 127\n");
+  
+  if (finger.templateCount >= 127) {
+    Serial.println("DATABASE FULL! Cannot add more fingerprints.");
+    return -1;
+  }
+  
+  Serial.println("\nScanning slots 1-127...");
+  
+  for (int i = 1; i <= 127; i++) {
+    if (i % 10 == 0) {
+      Serial.print("   Checking slot ");
+      Serial.print(i);
+      Serial.println("...");
+    }
+    
+    uint8_t p = finger.loadModel(i);
+    
+    if (p != FINGERPRINT_OK) {
+      Serial.println("\n");
+      Serial.print("FOUND EMPTY SLOT: ");
+      if (i < 10) Serial.print("  ");
+      else if (i < 100) Serial.print(" ");
+      Serial.print(i);
+      
+      if (hasLCD) {
+        lcd.clear();
+        lcd.print("Empty Slot: ");
+        lcd.print(i);
+        delay(1000);
+      }
+      
+      return i;
+    }
+  }
+  
+  Serial.println("\nNO EMPTY SLOT FOUND!");
+  Serial.println("   All 127 slots are occupied.");
+  return -1;
+}
+
+void performAutoEnrollment(int employeeId, const char* employeeName) {
+  Serial.println("AUTO ENROLLMENT STARTED");
+  Serial.print("Employee ID: ");
+  Serial.println(employeeId);
+  Serial.print("Employee Name: ");
+  Serial.println(employeeName);
+  
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("Enrolling:");
+    lcd.setCursor(0, 1);
+    lcd.print(employeeName);
+    delay(2000);
+  }
+  
+  int fingerprintId = findEmptySlot();
+  
+  if (fingerprintId == -1) {
+    Serial.println("\nENROLLMENT FAILED: No empty slot");
+    sendEnrollResult(employeeId, -1, false, "No empty slot available");
+    
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Memory Full!");
+      lcd.setCursor(0, 1);
+      lcd.print("Cannot Enroll");
+      delay(3000);
+      displayReady();
+    }
+    return;
+  }
+  
+  Serial.print("\nWill use slot: ");
+  Serial.println(fingerprintId);
+  
+  Serial.println("SCANNING FINGERPRINT");
+  
+  bool success = enrollFingerprint(fingerprintId, employeeName);
+  
+  if (success) {
+    Serial.println("ENROLLMENT SUCCESS!");
+    Serial.print("Employee: ");
+    Serial.println(employeeName);
+    Serial.print("Assigned ID: ");
+    Serial.println(fingerprintId);
+    
+    sendEnrollResult(employeeId, fingerprintId, true, "Enrollment successful");
+    
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Success!");
+      lcd.setCursor(0, 1);
+      lcd.print("ID: ");
+      lcd.print(fingerprintId);
+      delay(3000);
+    }
+  } else {
+    Serial.println("ENROLLMENT FAILED!");
+    
+    sendEnrollResult(employeeId, fingerprintId, false, "Enrollment failed");
+    
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Failed!");
+      lcd.setCursor(0, 1);
+      lcd.print("Try Again");
+      delay(3000);
+    }
+  }
+  
+  displayReady();
+}
+
+bool enrollFingerprint(int id, const char* name) {
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("Place finger...");
+  }
+  
+  Serial.println("\nStep 1: Place your finger on the sensor");
+  Serial.println("   Waiting for finger...");
+  
+  int p = -1;
+  int timeout = 0;
+  while (p != FINGERPRINT_OK && timeout < 200) {
+    p = finger.getImage();
+    
+    if (timeout % 20 == 0 && timeout > 0) {
+      Serial.print("   Still waiting... (");
+      Serial.print(timeout / 10);
+      Serial.println("s)");
+    }
+    
+    delay(100);
+    timeout++;
+  }
+  
+  if (timeout >= 200) {
+    Serial.println("TIMEOUT: No finger detected!");
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Timeout!");
+      lcd.setCursor(0, 1);
+      lcd.print("No finger");
+      delay(2000);
+    }
+    return false;
+  }
+  
+  Serial.println("Finger detected!");
+  
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("ERROR: Failed to convert image 1");
+    return false;
+  }
+  
+  Serial.println("Image 1 captured and converted!");
+  
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("Image 1 OK!");
+    lcd.setCursor(0, 1);
+    lcd.print("Remove finger");
+  }
+  
+  delay(2000);
+  
+  Serial.println("\nPlease remove your finger...");
+  p = 0;
+  timeout = 0;
+  while (p != FINGERPRINT_NOFINGER && timeout < 50) {
+    p = finger.getImage();
+    delay(100);
+    timeout++;
+  }
+  
+  if (p == FINGERPRINT_NOFINGER) {
+    Serial.println("Finger removed");
+  }
+  
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("Place same");
+    lcd.setCursor(0, 1);
+    lcd.print("finger again...");
+  }
+  
+  Serial.println("\nStep 2: Place the SAME finger again");
+  Serial.println("   Waiting for finger...");
+  
+  p = -1;
+  timeout = 0;
+  while (p != FINGERPRINT_OK && timeout < 200) {
+    p = finger.getImage();
+    
+    if (timeout % 20 == 0 && timeout > 0) {
+      Serial.print("   Still waiting... (");
+      Serial.print(timeout / 10);
+      Serial.println("s)");
+    }
+    
+    delay(100);
+    timeout++;
+  }
+  
+  if (timeout >= 200) {
+    Serial.println("TIMEOUT: No finger detected on second attempt!");
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Timeout!");
+      delay(2000);
+    }
+    return false;
+  }
+  
+  Serial.println("Finger detected!");
+  
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("ERROR: Failed to convert image 2");
+    return false;
+  }
+  
+  Serial.println("Image 2 captured and converted!");
+  
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("Image 2 OK!");
+    lcd.setCursor(0, 1);
+    lcd.print("Processing...");
+  }
+  
+  Serial.println("\nCreating fingerprint model...");
+  p = finger.createModel();
+  
+  if (p != FINGERPRINT_OK) {
+    Serial.println("ERROR: Fingerprints do not match!");
+    Serial.println("   Please try again with the same finger.");
+    
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("Mismatch!");
+      lcd.setCursor(0, 1);
+      lcd.print("Try Again");
+      delay(2000);
+    }
+    return false;
+  }
+  
+  Serial.println("Model created successfully!");
+  
+  Serial.print("\nSaving to slot ");
+  Serial.print(id);
+  Serial.println("...");
+  
+  p = finger.storeModel(id);
+  
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Successfully saved!");
+    return true;
+  } else {
+    Serial.print("Storage error, code: ");
+    Serial.println(p);
+    return false;
+  }
+}
+
+void sendEnrollResult(int employeeId, int fingerprintId, bool success, const char* message) {
+  if (!mqttClient.connected()) {
+    Serial.println("✗ MQTT not connected, cannot send result");
+    return;
+  }
+  
+  finger.getTemplateCount();
+  
+  StaticJsonDocument<512> doc;
+  doc["employee_id"] = employeeId;
+  doc["fingerprint_id"] = fingerprintId;
+  doc["success"] = success;
+  doc["message"] = message;
+  doc["device_name"] = DEVICE_NAME;
+  doc["total_fingerprints"] = finger.templateCount;
+  doc["timestamp"] = millis();
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  Serial.print("\n[MQTT] Sending enroll result: ");
+  Serial.println(payload);
+  
+  bool published = mqttClient.publish(TOPIC_ENROLL_RESULT.c_str(), payload.c_str());
+  
+  if (published) {
+    Serial.println("[MQTT] ✓ Result sent successfully");
+  } else {
+    Serial.println("[MQTT] ✗ Failed to send result");
+  }
+}
+
+// ========== ATTENDANCE LOG MANAGEMENT ==========
+
+void resetAttendanceLog() {
+  for (int i = 0; i < 127; i++) {
+    attendanceLog[i].fingerID = -1;
+    attendanceLog[i].isCheckin = 1;
+    attendanceLog[i].lastCheckTime = 0;
+  }
+  Serial.println("Attendance log reset");
+}
+
+int getIsCheckin(int fingerID) {
+  for (int i = 0; i < 127; i++) {
+    if (attendanceLog[i].fingerID == fingerID) {
+      return attendanceLog[i].isCheckin;
+    }
+  }
+  return 1;
+}
+
+void toggleCheckin(int fingerID) {
+  for (int i = 0; i < 127; i++) {
+    if (attendanceLog[i].fingerID == fingerID) {
+      attendanceLog[i].isCheckin = (attendanceLog[i].isCheckin == 1) ? 0 : 1;
+      attendanceLog[i].lastCheckTime = millis();
+      return;
+    }
+  }
+  
+  for (int i = 0; i < 127; i++) {
+    if (attendanceLog[i].fingerID == -1) {
+      attendanceLog[i].fingerID = fingerID;
+      attendanceLog[i].isCheckin = 0;
+      attendanceLog[i].lastCheckTime = millis();
+      return;
+    }
+  }
+}
+
+void checkAndResetDaily() {
+  unsigned long currentMillis = millis();
+  int calculatedDay = (currentMillis / (24UL * 60 * 60 * 1000)) % 365;
+  
+  if (calculatedDay != currentDay) {
+    currentDay = calculatedDay;
+    resetAttendanceLog();
+    
+    if (hasLCD) {
+      lcd.clear();
+      lcd.print("New Day!");
+      lcd.setCursor(0, 1);
+      lcd.print("Log Reset");
+      delay(2000);
+      displayReady();
+    }
+    Serial.println("=== NEW DAY - LOG RESET ===");
+  }
+}
+
+void displayReady() {
+  if (hasLCD) {
+    lcd.clear();
+    lcd.print("Place Finger");
+    lcd.setCursor(0, 1);
+    lcd.print("to Check In/Out");
+  }
 }
