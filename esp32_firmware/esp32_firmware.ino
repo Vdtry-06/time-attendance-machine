@@ -7,11 +7,11 @@
 
 // ========== CẤU HÌNH ==========
 // WiFi
-const char* ssid = "iPhone của tui";
-const char* password = "66668888";
+const char* ssid = "?";
+const char* password = "?";
 
 // Backend Server (HTTP cho checkin)
-const char* SERVER_URL = "https://7dt1dz37-8080.asse.devtunnels.ms";
+const char* SERVER_URL = "?";
 const char* DEVICE_NAME = "ESP32-AS608-01";
 
 // MQTT Broker
