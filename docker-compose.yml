@@ -15,6 +15,60 @@ services:
     networks:
       - attendance-network
 
-networks:
-  attendance-network:
-    driver: bridge
+  # ========== MQTT BROKER ==========
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto_iot
+    restart: always
+    ports:
+      - "1883:1883"      # MQTT port
+      - "9001:9001"      # WebSocket port (optional)
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    command: mosquitto -c /mosquitto/config/mosquitto.conf
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql_iot
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: iotfinger
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "user", "-ppassword"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: backend_iot
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_NAME: iotfinger
+      MQTT_BROKER: mqtt://broker.hivemq.com:1883
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/uploads:/app/uploads
+
+volumes:
+  db_data:

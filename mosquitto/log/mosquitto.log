@@ -1,0 +1,161 @@
+1765172183: mosquitto version 2.0.22 starting
+1765172183: Config loaded from /mosquitto/config/mosquitto.conf.
+1765172183: Opening ipv4 listen socket on port 1883.
+1765172183: Opening ipv6 listen socket on port 1883.
+1765172183: Opening websockets listen socket on port 9001.
+1765172183: mosquitto version 2.0.22 running
+1765172288: New connection from 172.18.0.1:59530 on port 1883.
+1765172288: Client <unknown> disconnected due to protocol error.
+1765172288: New connection from 172.18.0.1:59532 on port 1883.
+1765172289: Client <unknown> disconnected due to protocol error.
+1765172289: New connection from 172.18.0.1:59540 on port 1883.
+1765172289: Client <unknown> disconnected due to protocol error.
+1765173983: Saving in-memory database to /mosquitto/data//mosquitto.db.
+1765175784: Saving in-memory database to /mosquitto/data//mosquitto.db.
+1765176266: mosquitto version 2.0.22 terminating
+1765176266: Saving in-memory database to /mosquitto/data//mosquitto.db.
+1765176292: mosquitto version 2.0.22 starting
+1765176292: Config loaded from /mosquitto/config/mosquitto.conf.
+1765176292: Opening ipv4 listen socket on port 1883.
+1765176292: Opening ipv6 listen socket on port 1883.
+1765176292: Opening websockets listen socket on port 9001.
+1765176292: mosquitto version 2.0.22 running
+1765176298: New connection from 172.18.0.4:48806 on port 1883.
+1765176298: New client connected from 172.18.0.4:48806 as backend_3b24e4cca499 (p2, c1, k60).
+1765176298: No will message specified.
+1765176298: Sending CONNACK to backend_3b24e4cca499 (0, 0)
+1765176298: Received SUBSCRIBE from backend_3b24e4cca499
+1765176298: 	iot/device/+/enroll/result (QoS 0)
+1765176298: backend_3b24e4cca499 0 iot/device/+/enroll/result
+1765176298: Sending SUBACK to backend_3b24e4cca499
+1765176298: Received SUBSCRIBE from backend_3b24e4cca499
+1765176298: 	iot/device/+/heartbeat (QoS 0)
+1765176298: backend_3b24e4cca499 0 iot/device/+/heartbeat
+1765176298: Sending SUBACK to backend_3b24e4cca499
+1765176298: Received SUBSCRIBE from backend_3b24e4cca499
+1765176298: 	iot/device/+/status (QoS 0)
+1765176298: backend_3b24e4cca499 0 iot/device/+/status
+1765176298: Sending SUBACK to backend_3b24e4cca499
+1765176358: Received PINGREQ from backend_3b24e4cca499
+1765176358: Sending PINGRESP to backend_3b24e4cca499
+1765176418: Received PINGREQ from backend_3b24e4cca499
+1765176418: Sending PINGRESP to backend_3b24e4cca499
+1765176478: Received PINGREQ from backend_3b24e4cca499
+1765176478: Sending PINGRESP to backend_3b24e4cca499
+1765176494: Received PUBLISH from backend_3b24e4cca499 (d0, q1, r0, m48499, 'iot/device/ESP32-AS608-01/command', ... (98 bytes))
+1765176494: Sending PUBACK to backend_3b24e4cca499 (m48499, rc0)
+1765176554: Received PINGREQ from backend_3b24e4cca499
+1765176554: Sending PINGRESP to backend_3b24e4cca499
+1765176614: Received PINGREQ from backend_3b24e4cca499
+1765176614: Sending PINGRESP to backend_3b24e4cca499
+1765176674: Received PINGREQ from backend_3b24e4cca499
+1765176674: Sending PINGRESP to backend_3b24e4cca499
+1765176734: Received PINGREQ from backend_3b24e4cca499
+1765176734: Sending PINGRESP to backend_3b24e4cca499
+1765176794: Received PINGREQ from backend_3b24e4cca499
+1765176794: Sending PINGRESP to backend_3b24e4cca499
+1765176854: Received PINGREQ from backend_3b24e4cca499
+1765176854: Sending PINGRESP to backend_3b24e4cca499
+1765176914: Received PINGREQ from backend_3b24e4cca499
+1765176914: Sending PINGRESP to backend_3b24e4cca499
+1765176974: Received PINGREQ from backend_3b24e4cca499
+1765176974: Sending PINGRESP to backend_3b24e4cca499
+1765177034: Received PINGREQ from backend_3b24e4cca499
+1765177034: Sending PINGRESP to backend_3b24e4cca499
+1765177094: Received PINGREQ from backend_3b24e4cca499
+1765177094: Sending PINGRESP to backend_3b24e4cca499
+1765177114: Received PUBLISH from backend_3b24e4cca499 (d0, q1, r0, m48500, 'iot/device/ESP32-AS608-01/command', ... (98 bytes))
+1765177114: Sending PUBACK to backend_3b24e4cca499 (m48500, rc0)
+1765177174: Received PINGREQ from backend_3b24e4cca499
+1765177174: Sending PINGRESP to backend_3b24e4cca499
+1765177234: Received PINGREQ from backend_3b24e4cca499
+1765177234: Sending PINGRESP to backend_3b24e4cca499
+1765177294: Received PINGREQ from backend_3b24e4cca499
+1765177294: Sending PINGRESP to backend_3b24e4cca499
+1765177354: Received PINGREQ from backend_3b24e4cca499
+1765177354: Sending PINGRESP to backend_3b24e4cca499
+1765177414: Received PINGREQ from backend_3b24e4cca499
+1765177414: Sending PINGRESP to backend_3b24e4cca499
+1765177474: Received PINGREQ from backend_3b24e4cca499
+1765177474: Sending PINGRESP to backend_3b24e4cca499
+1765177534: Received PINGREQ from backend_3b24e4cca499
+1765177534: Sending PINGRESP to backend_3b24e4cca499
+1765177594: Received PINGREQ from backend_3b24e4cca499
+1765177594: Sending PINGRESP to backend_3b24e4cca499
+1765177654: Received PINGREQ from backend_3b24e4cca499
+1765177654: Sending PINGRESP to backend_3b24e4cca499
+1765177714: Received PINGREQ from backend_3b24e4cca499
+1765177714: Sending PINGRESP to backend_3b24e4cca499
+1765177774: Received PINGREQ from backend_3b24e4cca499
+1765177774: Sending PINGRESP to backend_3b24e4cca499
+1765177834: Received PINGREQ from backend_3b24e4cca499
+1765177834: Sending PINGRESP to backend_3b24e4cca499
+1765177894: Received PINGREQ from backend_3b24e4cca499
+1765177894: Sending PINGRESP to backend_3b24e4cca499
+1765177954: Received PINGREQ from backend_3b24e4cca499
+1765177954: Sending PINGRESP to backend_3b24e4cca499
+1765178014: Received PINGREQ from backend_3b24e4cca499
+1765178014: Sending PINGRESP to backend_3b24e4cca499
+1765178075: Received PINGREQ from backend_3b24e4cca499
+1765178075: Sending PINGRESP to backend_3b24e4cca499
+1765178092: Saving in-memory database to /mosquitto/data//mosquitto.db.
+1765178121: Received PUBLISH from backend_3b24e4cca499 (d0, q1, r0, m48501, 'iot/device/ESP32-AS608-01/command', ... (98 bytes))
+1765178121: Sending PUBACK to backend_3b24e4cca499 (m48501, rc0)
+1765178163: Received PUBLISH from backend_3b24e4cca499 (d0, q1, r0, m48502, 'iot/device/ESP32-AS608-01/command', ... (98 bytes))
+1765178163: Sending PUBACK to backend_3b24e4cca499 (m48502, rc0)
+1765178223: Received PINGREQ from backend_3b24e4cca499
+1765178223: Sending PINGRESP to backend_3b24e4cca499
+1765178283: Received PINGREQ from backend_3b24e4cca499
+1765178283: Sending PINGRESP to backend_3b24e4cca499
+1765178343: Received PINGREQ from backend_3b24e4cca499
+1765178343: Sending PINGRESP to backend_3b24e4cca499
+1765178403: Received PINGREQ from backend_3b24e4cca499
+1765178403: Sending PINGRESP to backend_3b24e4cca499
+1765178463: Received PINGREQ from backend_3b24e4cca499
+1765178463: Sending PINGRESP to backend_3b24e4cca499
+1765178523: Received PINGREQ from backend_3b24e4cca499
+1765178523: Sending PINGRESP to backend_3b24e4cca499
+1765178583: Received PINGREQ from backend_3b24e4cca499
+1765178583: Sending PINGRESP to backend_3b24e4cca499
+1765178643: Received PINGREQ from backend_3b24e4cca499
+1765178643: Sending PINGRESP to backend_3b24e4cca499
+1765178663: New connection from 172.18.0.1:43986 on port 1883.
+1765178663: New connection from 172.18.0.1:43988 on port 1883.
+1765178663: Client <unknown> closed its connection.
+1765178663: Client <unknown> disconnected due to protocol error.
+1765178665: New connection from 172.18.0.1:43992 on port 1883.
+1765178665: New connection from 172.18.0.1:44008 on port 1883.
+1765178665: Client <unknown> closed its connection.
+1765178665: Client <unknown> disconnected due to protocol error.
+1765178696: New connection from 172.18.0.1:47504 on port 1883.
+1765178696: New connection from 172.18.0.1:47514 on port 1883.
+1765178696: Client <unknown> closed its connection.
+1765178696: Client <unknown> disconnected due to protocol error.
+1765178703: Received PINGREQ from backend_3b24e4cca499
+1765178703: Sending PINGRESP to backend_3b24e4cca499
+1765178706: New connection from 172.18.0.1:48674 on port 1883.
+1765178706: New connection from 172.18.0.1:48680 on port 1883.
+1765178706: Client <unknown> closed its connection.
+1765178706: Client <unknown> disconnected due to protocol error.
+1765178763: Received PINGREQ from backend_3b24e4cca499
+1765178763: Sending PINGRESP to backend_3b24e4cca499
+1765178823: Received PINGREQ from backend_3b24e4cca499
+1765178823: Sending PINGRESP to backend_3b24e4cca499
+1765178883: Received PINGREQ from backend_3b24e4cca499
+1765178883: Sending PINGRESP to backend_3b24e4cca499
+1765178943: Received PINGREQ from backend_3b24e4cca499
+1765178943: Sending PINGRESP to backend_3b24e4cca499
+1765179003: Received PINGREQ from backend_3b24e4cca499
+1765179003: Sending PINGRESP to backend_3b24e4cca499
+1765179063: Received PINGREQ from backend_3b24e4cca499
+1765179063: Sending PINGRESP to backend_3b24e4cca499
+1765179123: Received PINGREQ from backend_3b24e4cca499
+1765179123: Sending PINGRESP to backend_3b24e4cca499
+1765179183: Received PINGREQ from backend_3b24e4cca499
+1765179183: Sending PINGRESP to backend_3b24e4cca499
+1765179243: Received PINGREQ from backend_3b24e4cca499
+1765179243: Sending PINGRESP to backend_3b24e4cca499
+1765179303: Received PINGREQ from backend_3b24e4cca499
+1765179303: Sending PINGRESP to backend_3b24e4cca499
+1765179355: Client backend_3b24e4cca499 closed its connection.
+1765179893: Saving in-memory database to /mosquitto/data//mosquitto.db.
